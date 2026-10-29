@@ -30,13 +30,23 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Verify Android SDK & Accept Licenses
+        run: |
+          echo "ANDROID_HOME: $ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+          if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          fi
+
+      - name: Setup Gradle 8.4
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
 
       - name: Generate & Verify Gradle Wrapper
         run: |
           cd android
-          # Generate the Gradle 8.4 wrapper script and jar using runner-provided Gradle
+          # Generate the official Gradle 8.4 wrapper files (gradlew and jar)
           gradle wrapper --gradle-version 8.4 --distribution-type bin
           chmod +x gradlew
           ./gradlew --version
