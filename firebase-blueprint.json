@@ -1,0 +1,251 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile record for Gaming Hub",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique user ID (auth UID)"
+        },
+        "phoneNumber": {
+          "type": "string",
+          "description": "Phone number used for sign-in"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "Gamer handle or display name"
+        },
+        "avatarUrl": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "URL to gamer avatar"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin"],
+          "description": "User role"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Account creation timestamp"
+        }
+      },
+      "required": ["id", "phoneNumber", "displayName", "role", "createdAt"]
+    },
+    "Wallet": {
+      "title": "Wallet",
+      "description": "User wallet balance ledger document (Server-Authoritative)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "User ID matching the wallet owner"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID owning this wallet"
+        },
+        "balance": {
+          "type": "number",
+          "description": "Available balance in Nigerian Naira (₦)"
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["NGN"],
+          "description": "Currency code"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last balance mutation timestamp"
+        }
+      },
+      "required": ["id", "userId", "balance", "currency", "updatedAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Immutable financial transaction log entry",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Transaction identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID"
+        },
+        "reference": {
+          "type": "string",
+          "description": "Paystack payment reference or internal session reference"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Amount in NGN"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["credit", "debit"],
+          "description": "Transaction type"
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["paystack", "session", "admin"],
+          "description": "Payment channel"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["success", "pending", "failed"],
+          "description": "Transaction status"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Transaction description"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Transaction creation timestamp"
+        }
+      },
+      "required": ["id", "userId", "reference", "amount", "type", "channel", "status", "createdAt"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "Gaming session record (₦100 per 1-hour session)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Session identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID"
+        },
+        "gameTitle": {
+          "type": "string",
+          "description": "Game title, e.g. Free Fire, CODM, or General"
+        },
+        "cost": {
+          "type": "number",
+          "description": "Cost in NGN (₦100)"
+        },
+        "durationMinutes": {
+          "type": "number",
+          "description": "Session duration (60 minutes)"
+        },
+        "startTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Session start timestamp"
+        },
+        "endTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Session end timestamp (startTime + 1 hour)"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "expired", "terminated"],
+          "description": "Session status"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Session creation timestamp"
+        }
+      },
+      "required": ["id", "userId", "gameTitle", "cost", "durationMinutes", "startTime", "endTime", "status", "createdAt"]
+    },
+    "MatchOpportunity": {
+      "title": "MatchOpportunity",
+      "description": "Purchased opportunity to play one normal match in a selected game (₦100/match)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique opportunity ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User UID who purchased the opportunity"
+        },
+        "gameId": {
+          "type": "string",
+          "description": "Selected game ID (e.g. game_free_fire)"
+        },
+        "gameTitle": {
+          "type": "string",
+          "description": "Selected game title"
+        },
+        "price": {
+          "type": "number",
+          "description": "Price in NGN (always ₦100)"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["available", "launched", "completed", "refunded"],
+          "description": "Opportunity lifecycle status"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "description": "Client or server idempotency key for purchase deduplication"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Purchase creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last status update timestamp"
+        },
+        "launchedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when game was launched"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when match was concluded"
+        },
+        "refundedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp if opportunity was refunded pre-launch"
+        }
+      },
+      "required": ["id", "userId", "gameId", "gameTitle", "price", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles with phone number and gamer tag"
+    },
+    "/wallets/{userId}": {
+      "schema": "Wallet",
+      "description": "User wallet balance document; client writes are strictly forbidden"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Financial ledger of wallet fundings and match deductions"
+    },
+    "/match_opportunities/{opportunityId}": {
+      "schema": "MatchOpportunity",
+      "description": "Match opportunities (₦100/match) lifecycle documents; client writes forbidden"
+    },
+    "/sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Legacy 1-hour sessions (deprecated in Stage 3)"
+    }
+  }
+}

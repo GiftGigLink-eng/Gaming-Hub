@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ng.gaminghub.app">
+
+    <!-- Permissions required for network streaming -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground Service permissions for Android 9+ (API 28+) and Android 14+ (API 34+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Audio permissions for internal game audio and mic fallback -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Post notifications permission for Android 13+ (API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Targeted Package Visibility Queries (Android 11+ / API 30+) -->
+    <queries>
+        <package android:name="com.dts.freefireth" />
+        <package android:name="com.dts.freefiremax" />
+        <package android:name="com.tencent.ig" />
+        <package android:name="com.activision.callofduty.shooter" />
+        <package android:name="com.supercell.brawlstars" />
+        <package android:name="com.mobile.legends" />
+        <package android:name="com.riotgames.league.wildrift" />
+        <package android:name="com.ea.gp.fifamobile" />
+        <package android:name="jp.konami.pesam" />
+        <package android:name="com.gameloft.android.ANMP.GloftA9HM" />
+        <package android:name="com.miHoYo.GenshinImpact" />
+        <package android:name="com.nekki.shadowfightarena" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Gaming Hub"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.NoActionBar"
+        android:usesCleartextTraffic="false">
+
+        <!-- Main WebView Activity hosting Gaming Hub -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- MediaProjection Foreground Service for screen & internal audio capture -->
+        <service
+            android:name=".broadcaster.ScreenCaptureService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+    </application>
+</manifest>

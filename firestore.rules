@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Admin collection
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && request.auth.uid == adminId;
+      allow list, write: if false;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      
+      // User can create their own profile, but cannot elevate role
+      allow create: if isValidId(userId) && isOwner(userId) 
+        && request.resource.data.id == userId
+        && request.resource.data.role == 'user'
+        && request.resource.data.keys().hasAll(['id', 'phoneNumber', 'displayName', 'role', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['id', 'phoneNumber', 'displayName', 'avatarUrl', 'role', 'createdAt'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 50;
+
+      // User can only update their display name and avatar, not role or balance
+      allow update: if isValidId(userId) && isOwner(userId)
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'avatarUrl'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 50;
+
+      allow delete: if isAdmin();
+    }
+
+    // Wallets collection: Client writes are strictly FORBIDDEN to prevent balance manipulation.
+    // Balances are only updated via trusted server endpoints (/api/paystack/verify, /api/sessions/start).
+    match /wallets/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // Transactions ledger: Read-only for owner, immutable, written strictly server-side.
+    match /transactions/{transactionId} {
+      allow get: if isValidId(transactionId) && isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    // Sessions collection: Read-only for owner, created and timed strictly server-side (legacy).
+    match /sessions/{sessionId} {
+      allow get: if isValidId(sessionId) && isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    // Match Opportunities collection: Read-only for owner or admin; writes strictly server-side.
+    match /match_opportunities/{opportunityId} {
+      allow get: if isValidId(opportunityId) && isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    // Live Match Rooms: Read allowed for signed in users; mutations handled server-authoritatively.
+    match /rooms/{roomId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if false;
+
+      // Real-time Chat Messages inside rooms: Read allowed for signed in users; writes via server.
+      match /messages/{messageId} {
+        allow get, list: if isSignedIn();
+        allow create, update, delete: if false;
+      }
+    }
+  }
+}

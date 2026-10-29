@@ -1,0 +1,6 @@
+{
+  "name": "Gaming Hub",
+  "description": "Mobile esports gaming hub with Paystack wallet funding, ₦100 one-hour sessions, live countdown timers, and game launchers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

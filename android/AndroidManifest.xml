@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Gaming Hub Android Manifest Configuration Guide
+  
+  PACKAGE VISIBILITY NOTICE (Android 11+ / API Level 30+):
+  Android restricts apps from querying arbitrary installed packages by default.
+  Google Play prohibits using QUERY_ALL_PACKAGES unless the app is an antivirus or device manager.
+  
+  Therefore, Gaming Hub uses targeted <queries> to declare package visibility for supported mobile games.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ng.gaminghub.app">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      Targeted Package Visibility Queries:
+      Declare supported game packages to check if they are installed via PackageManager.
+    -->
+    <queries>
+        <!-- Battle Royale Games -->
+        <package android:name="com.dts.freefireth" />
+        <package android:name="com.dts.freefiremax" />
+        <package android:name="com.tencent.ig" />
+        
+        <!-- Tactical Shooters & FPS -->
+        <package android:name="com.activision.callofduty.shooter" />
+        <package android:name="com.supercell.brawlstars" />
+        
+        <!-- MOBA Games -->
+        <package android:name="com.mobile.legends" />
+        <package android:name="com.riotgames.league.wildrift" />
+        
+        <!-- Sports & Racing -->
+        <package android:name="com.ea.gp.fifamobile" />
+        <package android:name="jp.konami.pesam" />
+        <package android:name="com.gameloft.android.ANMP.GloftA9HM" />
+        
+        <!-- Action & RPG -->
+        <package android:name="com.miHoYo.GenshinImpact" />
+        <package android:name="com.nekki.shadowfightarena" />
+
+        <!-- Generic Intent Filter for custom games added with standard launcher action -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Gaming Hub"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.GamingHub">
+        
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
