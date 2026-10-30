@@ -110,15 +110,23 @@ jobs:
 
       - name: Print Debug Keystore SHA-1 & SHA-256 for Firebase Registration
         run: |
-          echo "==================== ANDROID DEBUG KEYSTORE FINGERPRINTS ===================="
-          DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
-          if [ -f "$DEBUG_KEYSTORE" ]; then
-            keytool -list -v -keystore "$DEBUG_KEYSTORE" -alias androiddebugkey -storepass android -keypass android | grep -E "(SHA1|SHA256):"
+          echo "==================== ANDROID SIGNING REPORT ===================="
+          cd android
+          ./gradlew signingReport --no-daemon
+
+          echo "==================== APKSIGNER CERTIFICATE DIGESTS (FROM GENERATED APK) ===================="
+          APK_FILE="app/build/outputs/apk/debug/app-debug.apk"
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
+          if [ -f "$APK_FILE" ] && [ -x "$BUILD_TOOLS_DIR/apksigner" ]; then
+            "$BUILD_TOOLS_DIR/apksigner" verify --print-certs -v "$APK_FILE"
           else
-            echo "Keystore located in gradle cache or output:"
-            find ~/.android -name "*.keystore" -exec keytool -list -v -keystore {} -alias androiddebugkey -storepass android -keypass android \; 2>/dev/null | grep -E "(SHA1|SHA256):" || true
+            echo "Direct keystore inspection:"
+            find $HOME -name "debug.keystore" 2>/dev/null | while read k; do
+              echo "Found keystore: $k"
+              keytool -list -v -keystore "$k" -alias androiddebugkey -storepass android -keypass android | grep -E "(SHA1|SHA256):"
+            done
           fi
-          echo "============================================================================="
+          echo "=========================================================================================="
 
       - name: Verify APK Output
         run: |
