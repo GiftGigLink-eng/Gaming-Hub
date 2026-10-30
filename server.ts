@@ -120,10 +120,11 @@ app.get('/api/auth/user', authenticateFirebaseUser, async (req: AuthenticatedReq
     const userId = req.user!.uid;
     let user = await firestoreRepo.getUser(userId);
     if (!user) {
+      const emailPrefix = req.user!.email ? req.user!.email.split('@')[0] : null;
       user = {
         id: userId,
-        phoneNumber: req.user!.phoneNumber || '+2348000000000',
-        displayName: `Gamer_${userId.slice(-4)}`,
+        phoneNumber: req.user!.phoneNumber || (req.user!.email || '+2348000000000'),
+        displayName: emailPrefix || `Gamer_${userId.slice(-4)}`,
         role: 'user',
         createdAt: new Date().toISOString()
       };

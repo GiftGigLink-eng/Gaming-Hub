@@ -1,13 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, ShieldCheck, AlertCircle, CheckCircle2, RefreshCw, UserCheck, LogOut, Sparkles } from 'lucide-react';
+import {
+  X,
+  ShieldCheck,
+  AlertCircle,
+  CheckCircle2,
+  RefreshCw,
+  UserCheck,
+  LogOut,
+  Sparkles,
+  Mail,
+  Lock,
+  ArrowRight,
+  KeyRound,
+  UserPlus,
+  LogIn,
+} from 'lucide-react';
 import { UserProfile } from '../types.js';
 import { auth } from '../lib/firebase.js';
 import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  sendPasswordResetEmail,
   GoogleAuthProvider,
   signInWithPopup,
   signInWithCredential,
-  signOut,
 } from 'firebase/auth';
+import { validateEmail, validatePassword, getAuthErrorMessage } from '../lib/authValidation.js';
 
 interface PhoneAuthModalProps {
   isOpen: boolean;
@@ -16,17 +35,24 @@ interface PhoneAuthModalProps {
   onLoginSuccess: (user: UserProfile) => void;
 }
 
+type AuthMode = 'signin' | 'register' | 'forgot_password';
+
 export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
   isOpen,
   onClose,
   currentUser,
   onLoginSuccess,
 }) => {
+  const [authMode, setAuthMode] = useState<AuthMode>('signin');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Track active native sign-in request to prevent leaks & duplicates
+  // Track active native Google sign-in request to prevent leaks & duplicates
   const pendingNativeRequestRef = useRef<string | null>(null);
 
   // Set up native auth listener for responses dispatched from MainActivity
@@ -36,6 +62,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
         type: 'success' | 'cancelled' | 'error';
         requestId: string;
         idToken?: string;
+        errorCode?: string;
         error?: string;
       }>;
 
@@ -51,7 +78,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
 
       if (detail.type === 'cancelled') {
         setIsLoading(false);
-        setError('Sign-in cancelled. Tap below whenever you are ready to continue.');
+        setError('Google sign-in was cancelled by player.');
         return;
       }
 
@@ -88,7 +115,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
             onClose();
           }, 700);
         } catch (err: any) {
-          setError(err.message || 'Failed to complete authentication with Gaming Hub.');
+          setError(getAuthErrorMessage(err));
         } finally {
           setIsLoading(false);
         }
@@ -103,8 +130,159 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Reset transient fields when modal opens or closes
+  const resetForm = () => {
+    setEmail('');
+    setPassword('');
+    setConfirmPassword('');
+    setDisplayName('');
+    setError(null);
+    setSuccessMsg(null);
+  };
+
+  const handleModeChange = (newMode: AuthMode) => {
+    setAuthMode(newMode);
+    setError(null);
+    setSuccessMsg(null);
+  };
+
+  // Primary: Email/Password Registration
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isLoading) return;
+
+    setError(null);
+    setSuccessMsg(null);
+
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      setError(emailCheck.error!);
+      return;
+    }
+
+    const passwordCheck = validatePassword(password);
+    if (!passwordCheck.valid) {
+      setError(passwordCheck.error!);
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match. Please re-enter.');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      const firebaseUser = userCredential.user;
+      const token = await firebaseUser.getIdToken();
+
+      // Synchronize with server to create Firestore player profile and wallet
+      const res = await fetch('/api/auth/user', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to initialize player profile.');
+      }
+
+      setSuccessMsg(`Account created! Welcome, ${displayName || data.user.displayName || 'Player'}!`);
+      onLoginSuccess(data.user);
+      setTimeout(() => {
+        onClose();
+        resetForm();
+      }, 700);
+    } catch (err: any) {
+      setError(getAuthErrorMessage(err));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Primary: Email/Password Sign-In
+  const handleEmailSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isLoading) return;
+
+    setError(null);
+    setSuccessMsg(null);
+
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      setError(emailCheck.error!);
+      return;
+    }
+
+    if (!password) {
+      setError('Password is required.');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
+      const firebaseUser = userCredential.user;
+      const token = await firebaseUser.getIdToken();
+
+      // Retrieve synchronized player profile & wallet
+      const res = await fetch('/api/auth/user', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to retrieve player session.');
+      }
+
+      setSuccessMsg(`Welcome back, ${data.user.displayName || firebaseUser.email || 'Player'}!`);
+      onLoginSuccess(data.user);
+      setTimeout(() => {
+        onClose();
+        resetForm();
+      }, 700);
+    } catch (err: any) {
+      setError(getAuthErrorMessage(err));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Primary: Password Reset
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isLoading) return;
+
+    setError(null);
+    setSuccessMsg(null);
+
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      setError(emailCheck.error!);
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      setSuccessMsg(`Password reset email sent to ${email.trim()}! Please check your inbox and spam folder.`);
+    } catch (err: any) {
+      setError(getAuthErrorMessage(err));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Secondary Optional: Google Sign-In (Unblocked, available for users with working Google Play Services)
   const handleGoogleSignIn = async () => {
-    if (isLoading) return; // Prevent duplicate requests
+    if (isLoading) return;
     setIsLoading(true);
     setError(null);
     setSuccessMsg(null);
@@ -113,7 +291,6 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     const isNativeAndroid = typeof window !== 'undefined' && Boolean(window.AndroidBridge?.triggerGoogleSignIn);
 
     if (isNativeAndroid) {
-      // Use Android Native Credential Manager Flow
       const requestId = `auth_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       pendingNativeRequestRef.current = requestId;
 
@@ -127,7 +304,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
       return;
     }
 
-    // Standard Browser / PWA Flow (Desktop, mobile Chrome/Safari, etc.)
+    // Web Browser fallback
     try {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
@@ -135,7 +312,6 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
       const firebaseUser = userCredential.user;
       const token = await firebaseUser.getIdToken();
 
-      // Authenticate with server to create/retrieve Firestore profile & wallet
       const res = await fetch('/api/auth/user', {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -151,21 +327,10 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
       onLoginSuccess(data.user);
       setTimeout(() => {
         onClose();
+        resetForm();
       }, 700);
     } catch (err: any) {
-      if (err.code === 'auth/popup-closed-by-user') {
-        setError('Sign-in pop-up was closed before completing. Tap below whenever you are ready.');
-      } else if (err.code === 'auth/popup-blocked') {
-        setError('Pop-up was blocked by your browser. Please allow pop-ups for Gaming Hub and try again.');
-      } else if (err.code === 'auth/unauthorized-domain') {
-        setError(
-          'This web domain is not yet on the Firebase Authorized Domains list. Please add this domain in Firebase Console under Authentication > Settings > Authorized Domains.'
-        );
-      } else if (err.code === 'auth/cancelled-popup-request') {
-        setError(null);
-      } else {
-        setError(err.message || 'Failed to sign in with Google. Please try again.');
-      }
+      setError(getAuthErrorMessage(err));
     } finally {
       setIsLoading(false);
     }
@@ -180,9 +345,10 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
       setSuccessMsg('Signed out successfully.');
       setTimeout(() => {
         onClose();
+        resetForm();
       }, 500);
     } catch (err: any) {
-      setError(err.message || 'Failed to sign out.');
+      setError(getAuthErrorMessage(err));
     } finally {
       setIsLoading(false);
     }
@@ -190,7 +356,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="relative w-full max-w-md bg-[#0E121E] border border-white/[0.08] rounded-3xl overflow-hidden shadow-2xl p-6 max-h-[90vh] overflow-y-auto space-y-4">
+      <div className="relative w-full max-w-md bg-[#0E121E] border border-white/[0.08] rounded-3xl overflow-hidden shadow-2xl p-6 max-h-[92vh] overflow-y-auto space-y-4">
         {/* Modal Header */}
         <div className="flex justify-between items-center pb-3 border-b border-white/[0.06]">
           <div className="flex items-center gap-2.5">
@@ -199,7 +365,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
             </div>
             <div>
               <h3 className="font-black text-base text-white">Player Authentication</h3>
-              <p className="text-[11px] text-zinc-400">Zero-Trust Identity Foundation</p>
+              <p className="text-[11px] text-zinc-400">Firebase Zero-Trust Identity</p>
             </div>
           </div>
           <button
@@ -255,7 +421,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                     ID: {currentUser.id}
                   </div>
                   {auth.currentUser?.email && (
-                    <div className="text-[10px] text-zinc-400 truncate">
+                    <div className="text-[10px] text-emerald-300/80 truncate">
                       {auth.currentUser.email}
                     </div>
                   )}
@@ -290,38 +456,276 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
             </button>
           </div>
         ) : (
-          /* Unauthenticated / Sign In State */
+          /* Unauthenticated Auth State (Email/Password Primary) */
           <div className="space-y-4">
-            <div className="p-4 rounded-2xl bg-zinc-900/80 border border-white/[0.06] space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-wider text-zinc-400">
-                  Guest Session
-                </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full font-bold bg-zinc-800 text-zinc-400 border border-white/10">
-                  UNREGISTERED
-                </span>
-              </div>
-              <p className="text-xs text-zinc-300 leading-relaxed pt-1">
-                Sign in with your Google account to access your esports wallet, fund match passes with Paystack, and track multi-game tournament opportunities.
-              </p>
+            {/* Mode Switcher Tabs */}
+            <div className="flex p-1 rounded-2xl bg-zinc-900/90 border border-white/[0.06]">
+              <button
+                type="button"
+                onClick={() => handleModeChange('signin')}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                  authMode === 'signin'
+                    ? 'bg-emerald-500 text-zinc-950 shadow-md font-extrabold'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => handleModeChange('register')}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                  authMode === 'register'
+                    ? 'bg-emerald-500 text-zinc-950 shadow-md font-extrabold'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Register
+              </button>
+              <button
+                type="button"
+                onClick={() => handleModeChange('forgot_password')}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                  authMode === 'forgot_password'
+                    ? 'bg-emerald-500 text-zinc-950 shadow-md font-extrabold'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Reset
+              </button>
             </div>
 
-            {/* Google Sign-In Action Button */}
+            {/* Email/Password Sign-In Form */}
+            {authMode === 'signin' && (
+              <form onSubmit={handleEmailSignIn} className="space-y-3.5">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Email Address</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="player@gaminghub.ng"
+                    required
+                    autoComplete="email"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Password</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => handleModeChange('forgot_password')}
+                      className="text-[10px] text-emerald-400 hover:text-emerald-300 font-semibold cursor-pointer"
+                    >
+                      Forgot?
+                    </button>
+                  </div>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter your password"
+                    required
+                    autoComplete="current-password"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer mt-2"
+                >
+                  {isLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Authenticating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <LogIn className="w-4 h-4" />
+                      <span>Sign In to Gaming Hub</span>
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
+
+            {/* Email/Password Register Form */}
+            {authMode === 'register' && (
+              <form onSubmit={handleRegister} className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Player Gamer Tag (Optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    placeholder="e.g. ApexTitan"
+                    maxLength={30}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Email Address</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="player@gaminghub.ng"
+                    required
+                    autoComplete="email"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Password (min. 6 chars)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Choose a strong password"
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Confirm Password</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm your password"
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer mt-2"
+                >
+                  {isLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Creating Account...</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-4 h-4" />
+                      <span>Create Player Account</span>
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
+
+            {/* Forgot Password Reset Form */}
+            {authMode === 'forgot_password' && (
+              <form onSubmit={handlePasswordReset} className="space-y-3.5">
+                <div className="p-3 rounded-2xl bg-zinc-900/80 border border-white/[0.06] text-xs text-zinc-300 leading-relaxed">
+                  Enter your registered email address and we will send a secure password reset link directly to your inbox.
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Registered Email Address</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="player@gaminghub.ng"
+                    required
+                    autoComplete="email"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Sending Reset Email...</span>
+                    </>
+                  ) : (
+                    <>
+                      <KeyRound className="w-4 h-4" />
+                      <span>Send Password Reset Link</span>
+                    </>
+                  )}
+                </button>
+
+                <div className="text-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange('signin')}
+                    className="text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    Back to Sign In
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Divider */}
+            <div className="relative py-2">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-white/[0.08]" />
+              </div>
+              <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
+                <span className="bg-[#0E121E] px-2 text-zinc-500">Or continue with</span>
+              </div>
+            </div>
+
+            {/* Secondary Optional Google Sign-In Action */}
             <button
               type="button"
               onClick={handleGoogleSignIn}
               disabled={isLoading}
-              className="w-full min-h-[48px] py-3 px-4 rounded-2xl bg-white hover:bg-zinc-100 active:bg-zinc-200 text-zinc-900 font-extrabold text-sm shadow-xl transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center gap-3 cursor-pointer select-none"
+              className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-zinc-200 font-bold text-xs transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center gap-2.5 cursor-pointer"
             >
               {isLoading ? (
                 <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-zinc-900" />
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-zinc-300" />
                   <span>Connecting to Google...</span>
                 </>
               ) : (
                 <>
                   {/* Google "G" Colored SVG Icon */}
-                  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
                     <path
                       fill="#4285F4"
                       d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -339,13 +743,13 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                       d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                     />
                   </svg>
-                  <span>Sign in with Google</span>
+                  <span>Sign in with Google (Alternative)</span>
                 </>
               )}
             </button>
 
             <p className="text-[10px] text-zinc-500 text-center leading-normal">
-              Zero-trust authenticated · Passwords are never stored on Gaming Hub
+              Direct Firebase Authentication · Zero-Trust Protected
             </p>
           </div>
         )}
