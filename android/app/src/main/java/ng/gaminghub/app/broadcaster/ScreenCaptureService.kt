@@ -56,7 +56,7 @@ class ScreenCaptureService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private var mediaProjection: MediaProjection? = null
     private var liveKitRoom: Room? = null
-    private var screenVideoTrack: LocalScreencastVideoTrack? = null
+    private var screenVideoTrack: LocalVideoTrack? = null
     private var internalAudioTrack: LocalAudioTrack? = null
     private var audioRecord: AudioRecord? = null
 
