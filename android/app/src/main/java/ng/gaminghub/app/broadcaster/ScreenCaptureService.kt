@@ -20,9 +20,6 @@ import androidx.core.app.NotificationCompat
 import io.livekit.android.LiveKit
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.LocalAudioTrack
-import io.livekit.android.room.track.LocalVideoTrack
-import io.livekit.android.room.track.LocalVideoTrackOptions
-import io.livekit.android.room.track.VideoCaptureParameter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,7 +53,6 @@ class ScreenCaptureService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private var mediaProjection: MediaProjection? = null
     private var liveKitRoom: Room? = null
-    private var screenVideoTrack: LocalVideoTrack? = null
     private var internalAudioTrack: LocalAudioTrack? = null
     private var audioRecord: AudioRecord? = null
 
@@ -132,31 +128,14 @@ class ScreenCaptureService : Service() {
         val room = LiveKit.create(applicationContext)
         liveKitRoom = room
 
-        // Configure video capture parameters based on user quality setting (width, height, maxFps)
-        val (width, height, fps) = when (quality) {
-            "360p" -> Triple(640, 360, 30)
-            "480p" -> Triple(854, 480, 30)
-            "720p" -> Triple(1280, 720, 30)
-            else -> Triple(1280, 720, 30) // Auto defaults to 720p @ 30fps
-        }
-
         // Connect room over WebRTC
         room.connect(serverUrl, token)
         Log.i(TAG, "Connected to LiveKit room: ${room.name}")
 
-        // Create Screencast Track using the MediaProjection result intent and options
-        val trackOptions = LocalVideoTrackOptions(
-            isScreencast = true,
-            captureParams = VideoCaptureParameter(width, height, fps)
-        )
-        val videoTrack = room.localParticipant.createScreencastTrack(
-            name = "screen_share",
-            mediaProjectionPermissionResultData = permissionIntent,
-            options = trackOptions
-        )
-        screenVideoTrack = videoTrack
-        room.localParticipant.publishVideoTrack(videoTrack)
-        Log.i(TAG, "Published screen video track ($width x $height @ ${fps}fps)")
+        // Enable screen sharing using LiveKit official first-class API
+        // setScreenShareEnabled encapsulates track creation, media projection binder, and publishing
+        room.localParticipant.setScreenShareEnabled(true, permissionIntent)
+        Log.i(TAG, "Screen sharing published successfully via LiveKit LocalParticipant.")
 
         // Internal Audio Capture (Android 10+ / API 29+)
         if (captureAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mediaProjection != null) {
@@ -207,14 +186,19 @@ class ScreenCaptureService : Service() {
             audioRecord?.release()
             audioRecord = null
 
-            screenVideoTrack?.stop()
-            screenVideoTrack = null
-
             internalAudioTrack?.stop()
             internalAudioTrack = null
 
-            liveKitRoom?.disconnect()
-            liveKitRoom = null
+            serviceScope.launch {
+                try {
+                    liveKitRoom?.localParticipant?.setScreenShareEnabled(false)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error disabling screen share: ${e.message}")
+                } finally {
+                    liveKitRoom?.disconnect()
+                    liveKitRoom = null
+                }
+            }
 
             mediaProjection?.stop()
             mediaProjection = null
