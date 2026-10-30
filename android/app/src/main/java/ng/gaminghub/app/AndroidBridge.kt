@@ -9,11 +9,24 @@ import android.webkit.JavascriptInterface
 /**
  * AndroidBridge: Native Android JavascriptInterface
  *
- * Bridges the Gaming Hub React web app with the Android PackageManager.
- * Registered in WebView via:
- *   webView.addJavascriptInterface(AndroidBridge(context), "AndroidBridge")
+ * Bridges the Gaming Hub React web app with native Android capabilities:
+ * - Package Manager queries and app launch
+ * - Native Google Sign-In trigger via Jetpack Credential Manager
  */
 class AndroidBridge(private val context: Context) {
+
+    /**
+     * Triggers native Google Sign-In using Android Credential Manager.
+     * Called from Web frontend when running inside the Android container.
+     */
+    @JavascriptInterface
+    fun triggerGoogleSignIn(requestId: String) {
+        if (context is MainActivity) {
+            context.runOnUiThread {
+                context.startNativeGoogleSignIn(requestId)
+            }
+        }
+    }
 
     /**
      * Checks if a specific package ID is installed on this Android device.
@@ -64,7 +77,7 @@ class AndroidBridge(private val context: Context) {
     }
 
     /**
-     * Returns Android OS API level (e.g. 33 for Android 13).
+     * Returns Android OS API level (e.g. 34 for Android 14).
      */
     @JavascriptInterface
     fun getAndroidVersion(): Int {

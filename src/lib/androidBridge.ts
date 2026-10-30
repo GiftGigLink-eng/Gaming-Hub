@@ -6,6 +6,7 @@ declare global {
     AndroidBridge?: {
       isPackageInstalled: (packageId: string) => boolean;
       launchPackage: (packageId: string) => boolean;
+      triggerGoogleSignIn?: (requestId: string) => void;
       getInstalledGamesList?: () => string; // JSON array of installed package names
       getDeviceModel?: () => string;
       getAndroidVersion?: () => number;

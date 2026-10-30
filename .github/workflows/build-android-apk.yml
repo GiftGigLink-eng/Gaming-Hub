@@ -108,6 +108,18 @@ jobs:
           cd android
           ./gradlew assembleDebug --no-daemon --stacktrace
 
+      - name: Print Debug Keystore SHA-1 & SHA-256 for Firebase Registration
+        run: |
+          echo "==================== ANDROID DEBUG KEYSTORE FINGERPRINTS ===================="
+          DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
+          if [ -f "$DEBUG_KEYSTORE" ]; then
+            keytool -list -v -keystore "$DEBUG_KEYSTORE" -alias androiddebugkey -storepass android -keypass android | grep -E "(SHA1|SHA256):"
+          else
+            echo "Keystore located in gradle cache or output:"
+            find ~/.android -name "*.keystore" -exec keytool -list -v -keystore {} -alias androiddebugkey -storepass android -keypass android \; 2>/dev/null | grep -E "(SHA1|SHA256):" || true
+          fi
+          echo "============================================================================="
+
       - name: Verify APK Output
         run: |
           APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"

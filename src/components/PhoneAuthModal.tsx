@@ -1,8 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, ShieldCheck, AlertCircle, CheckCircle2, RefreshCw, UserCheck, LogOut, Sparkles } from 'lucide-react';
 import { UserProfile } from '../types.js';
 import { auth } from '../lib/firebase.js';
-import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithCredential,
+  signOut,
+} from 'firebase/auth';
 
 interface PhoneAuthModalProps {
   isOpen: boolean;
@@ -21,13 +26,107 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // Track active native sign-in request to prevent leaks & duplicates
+  const pendingNativeRequestRef = useRef<string | null>(null);
+
+  // Set up native auth listener for responses dispatched from MainActivity
+  useEffect(() => {
+    const handleNativeAuthResponse = async (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        type: 'success' | 'cancelled' | 'error';
+        requestId: string;
+        idToken?: string;
+        error?: string;
+      }>;
+
+      const detail = customEvent.detail;
+      if (!detail) return;
+
+      // Ignore events not matching the active pending request
+      if (pendingNativeRequestRef.current && detail.requestId !== pendingNativeRequestRef.current) {
+        return;
+      }
+
+      pendingNativeRequestRef.current = null;
+
+      if (detail.type === 'cancelled') {
+        setIsLoading(false);
+        setError('Sign-in cancelled. Tap below whenever you are ready to continue.');
+        return;
+      }
+
+      if (detail.type === 'error') {
+        setIsLoading(false);
+        setError(detail.error || 'Native Google Sign-In failed.');
+        return;
+      }
+
+      if (detail.type === 'success' && detail.idToken) {
+        try {
+          // Exchange Google ID Token with Firebase Web SDK
+          const credential = GoogleAuthProvider.credential(detail.idToken);
+          const userCredential = await signInWithCredential(auth, credential);
+          const firebaseUser = userCredential.user;
+          const token = await firebaseUser.getIdToken();
+
+          // Initialize or fetch user profile & wallet on server
+          const res = await fetch('/api/auth/user', {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || 'Failed to initialize player session.');
+          }
+
+          setSuccessMsg(`Welcome, ${data.user.displayName || firebaseUser.displayName || 'Player'}!`);
+          onLoginSuccess(data.user);
+          setTimeout(() => {
+            onClose();
+          }, 700);
+        } catch (err: any) {
+          setError(err.message || 'Failed to complete authentication with Gaming Hub.');
+        } finally {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    window.addEventListener('gaminghub:native_auth_response', handleNativeAuthResponse);
+    return () => {
+      window.removeEventListener('gaminghub:native_auth_response', handleNativeAuthResponse);
+    };
+  }, [onClose, onLoginSuccess]);
+
   if (!isOpen) return null;
 
   const handleGoogleSignIn = async () => {
+    if (isLoading) return; // Prevent duplicate requests
     setIsLoading(true);
     setError(null);
     setSuccessMsg(null);
 
+    // Detect if running inside the Native Android APK wrapper
+    const isNativeAndroid = typeof window !== 'undefined' && Boolean(window.AndroidBridge?.triggerGoogleSignIn);
+
+    if (isNativeAndroid) {
+      // Use Android Native Credential Manager Flow
+      const requestId = `auth_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      pendingNativeRequestRef.current = requestId;
+
+      try {
+        window.AndroidBridge!.triggerGoogleSignIn!(requestId);
+      } catch (nativeErr: any) {
+        pendingNativeRequestRef.current = null;
+        setIsLoading(false);
+        setError('Could not invoke native Android Credential Manager: ' + (nativeErr?.message || 'unknown error'));
+      }
+      return;
+    }
+
+    // Standard Browser / PWA Flow (Desktop, mobile Chrome/Safari, etc.)
     try {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
@@ -206,7 +305,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
               </p>
             </div>
 
-            {/* Genuine Google Sign-In Action Button */}
+            {/* Google Sign-In Action Button */}
             <button
               type="button"
               onClick={handleGoogleSignIn}
