@@ -30,13 +30,66 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Verify Android SDK & Accept Licenses
+      - name: Setup Android SDK Environment & Verify Components
         run: |
-          echo "ANDROID_HOME: $ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
-          if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
-            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          set -e
+
+          # 1. Resolve Android SDK directory from Runner environment
+          SDK_DIR="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          if [ ! -d "$SDK_DIR" ]; then
+            SDK_DIR="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           fi
+
+          if [ ! -d "$SDK_DIR" ]; then
+            echo "::error::Android SDK directory not found on runner."
+            exit 1
+          fi
+
+          echo "Using Android SDK root: $SDK_DIR"
+          echo "ANDROID_HOME=$SDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> $GITHUB_ENV
+
+          # 2. Locate sdkmanager executable (check latest first, then numbered versions)
+          SDKMANAGER=""
+          if [ -x "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER=$(find "$SDK_DIR/cmdline-tools" -maxdepth 3 -name "sdkmanager" -type f -perm -111 2>/dev/null | head -n 1)
+          fi
+
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager executable could not be located in $SDK_DIR/cmdline-tools"
+            exit 1
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --version
+
+          # 3. Accept all Android SDK licenses cleanly (do not ignore errors)
+          echo "Accepting Android SDK licenses..."
+          yes | "$SDKMANAGER" --licenses
+
+          # 4. Verify & install required platform (platforms;android-34) and build-tools (build-tools;34.0.0)
+          echo "Checking required Android SDK components..."
+          if [ ! -d "$SDK_DIR/platforms/android-34" ]; then
+            echo "Installing missing platforms;android-34..."
+            yes | "$SDKMANAGER" "platforms;android-34"
+          else
+            echo "platforms;android-34 is already installed."
+          fi
+
+          if [ ! -d "$SDK_DIR/build-tools/34.0.0" ]; then
+            echo "Installing missing build-tools;34.0.0..."
+            yes | "$SDKMANAGER" "build-tools;34.0.0"
+          else
+            echo "build-tools;34.0.0 is already installed."
+          fi
+
+          # 5. Final verification of required components
+          echo "Verifying installation:"
+          ls -ld "$SDK_DIR/platforms/android-34"
+          ls -ld "$SDK_DIR/build-tools/34.0.0"
+          echo "Android SDK environment verification complete."
 
       - name: Setup Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
@@ -46,7 +99,6 @@ jobs:
       - name: Generate & Verify Gradle Wrapper
         run: |
           cd android
-          # Generate the official Gradle 8.4 wrapper files (gradlew and jar)
           gradle wrapper --gradle-version 8.4 --distribution-type bin
           chmod +x gradlew
           ./gradlew --version
@@ -63,7 +115,7 @@ jobs:
             echo "Successfully generated APK: $APK_PATH"
             ls -lh "$APK_PATH"
           else
-            echo "ERROR: APK not found at $APK_PATH"
+            echo "::error::APK not found at $APK_PATH"
             exit 1
           fi
 
