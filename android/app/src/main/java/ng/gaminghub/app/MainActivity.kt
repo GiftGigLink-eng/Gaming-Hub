@@ -47,7 +47,12 @@ class MainActivity : AppCompatActivity() {
             settings.domStorageEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
             settings.cacheMode = WebSettings.LOAD_DEFAULT
-            webViewClient = WebViewClient()
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    Log.d(TAG, "[WebView] onPageFinished: $url")
+                }
+            }
         }
         setContentView(webView)
 
@@ -64,14 +69,17 @@ class MainActivity : AppCompatActivity() {
      * Prevents concurrent duplicate requests and dispatches results securely via JSON.
      */
     fun startNativeGoogleSignIn(requestId: String) {
+        Log.i(TAG, "[AuthStage: 1_NATIVE_REQUEST_RECEIVED] requestId: $requestId")
+
         if (!isSignInInProgress.compareAndSet(false, true)) {
-            Log.w(TAG, "Google sign-in request already in progress. Ignoring duplicate.")
-            dispatchAuthEvent("error", requestId, "Google sign-in is already in progress.")
+            Log.w(TAG, "[AuthStage: DUPLICATE_BLOCKED] Google sign-in request already in progress for requestId: $requestId")
+            dispatchAuthEvent("error", requestId, "AUTH_IN_PROGRESS", "Google sign-in is already in progress.")
             return
         }
 
         lifecycleScope.launch {
             try {
+                Log.i(TAG, "[AuthStage: 2_CREDENTIAL_MANAGER_INIT] Initializing CredentialManager with WEB_CLIENT_ID: $WEB_CLIENT_ID")
                 val credentialManager = CredentialManager.create(this@MainActivity)
 
                 // Generate secure random nonce for authentication verification
@@ -90,10 +98,13 @@ class MainActivity : AppCompatActivity() {
                     .addCredentialOption(googleIdOption)
                     .build()
 
+                Log.i(TAG, "[AuthStage: 3_LAUNCHING_BOTTOM_SHEET] Requesting user account selection from Google Play Services...")
                 val result = credentialManager.getCredential(
                     context = this@MainActivity,
                     request = request
                 )
+
+                Log.i(TAG, "[AuthStage: 4_CREDENTIAL_RECEIVED] Received credential response of type: ${result.credential.javaClass.simpleName}")
 
                 val credential = result.credential
                 if (credential is CustomCredential &&
@@ -103,23 +114,27 @@ class MainActivity : AppCompatActivity() {
                     val idToken = googleIdTokenCredential.idToken
 
                     if (!idToken.isNullOrBlank()) {
-                        // Dispatch token securely to Web layer
+                        Log.i(TAG, "[AuthStage: 5_ID_TOKEN_PARSED] Successfully obtained ID token (length: ${idToken.length}). Dispatching to Web layer.")
                         dispatchAuthSuccess(requestId, idToken)
                     } else {
-                        dispatchAuthEvent("error", requestId, "Empty Google ID token received.")
+                        Log.e(TAG, "[AuthStage: ERROR_EMPTY_TOKEN] ID token from GoogleIdTokenCredential is null or blank.")
+                        dispatchAuthEvent("error", requestId, "EMPTY_ID_TOKEN", "Empty Google ID token received from Play Services.")
                     }
                 } else {
-                    dispatchAuthEvent("error", requestId, "Unsupported credential format received from provider.")
+                    Log.e(TAG, "[AuthStage: ERROR_UNSUPPORTED_CREDENTIAL] Received credential format: ${credential.type}")
+                    dispatchAuthEvent("error", requestId, "UNSUPPORTED_CREDENTIAL", "Unsupported credential format received from Google Play Services.")
                 }
             } catch (e: GetCredentialCancellationException) {
-                Log.i(TAG, "User cancelled Google Sign-In flow.")
-                dispatchAuthEvent("cancelled", requestId, "Sign-in cancelled by player.")
+                Log.i(TAG, "[AuthStage: CANCELLED] Player dismissed Google account selection prompt: ${e.message}")
+                dispatchAuthEvent("cancelled", requestId, "USER_CANCELLED", "Sign-in cancelled by player.")
             } catch (e: GetCredentialException) {
-                Log.e(TAG, "Credential Manager error during Google Sign-In: ${e.message}", e)
-                dispatchAuthEvent("error", requestId, e.message ?: "Authentication failed via Google Play Services.")
+                val errorCode = e.javaClass.simpleName
+                Log.e(TAG, "[AuthStage: CREDENTIAL_MANAGER_EXCEPTION] Code: $errorCode, Message: ${e.message}")
+                dispatchAuthEvent("error", requestId, errorCode, e.message ?: "Authentication failed via Google Play Services.")
             } catch (e: Exception) {
-                Log.e(TAG, "Unexpected error during native sign-in: ${e.message}", e)
-                dispatchAuthEvent("error", requestId, e.message ?: "An unexpected error occurred during sign-in.")
+                val errorCode = e.javaClass.simpleName
+                Log.e(TAG, "[AuthStage: UNEXPECTED_EXCEPTION] Code: $errorCode, Message: ${e.message}")
+                dispatchAuthEvent("error", requestId, errorCode, e.message ?: "An unexpected error occurred during sign-in.")
             } finally {
                 isSignInInProgress.set(false)
             }
@@ -146,10 +161,11 @@ class MainActivity : AppCompatActivity() {
     /**
      * Dispatches cancellation or error events to WebView using safe JSON serialization.
      */
-    private fun dispatchAuthEvent(type: String, requestId: String, message: String) {
+    private fun dispatchAuthEvent(type: String, requestId: String, errorCode: String, message: String) {
         val payload = JSONObject().apply {
             put("type", type)
             put("requestId", requestId)
+            put("errorCode", errorCode)
             put("error", message)
         }
 

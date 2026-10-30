@@ -57,7 +57,8 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
 
       if (detail.type === 'error') {
         setIsLoading(false);
-        setError(detail.error || 'Native Google Sign-In failed.');
+        const codeSuffix = detail.errorCode ? ` [Code: ${detail.errorCode}]` : '';
+        setError((detail.error || 'Native Google Sign-In failed.') + codeSuffix);
         return;
       }
 
