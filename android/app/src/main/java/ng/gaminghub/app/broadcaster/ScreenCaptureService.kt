@@ -18,7 +18,6 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.livekit.android.LiveKit
-import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.LocalAudioTrack
 import io.livekit.android.room.track.LocalVideoTrack
@@ -57,7 +56,7 @@ class ScreenCaptureService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private var mediaProjection: MediaProjection? = null
     private var liveKitRoom: Room? = null
-    private var screenVideoTrack: LocalVideoTrack? = null
+    private var screenVideoTrack: LocalScreencastVideoTrack? = null
     private var internalAudioTrack: LocalAudioTrack? = null
     private var audioRecord: AudioRecord? = null
 
@@ -85,7 +84,12 @@ class ScreenCaptureService : Service() {
         startForeground(NOTIFICATION_ID, notification)
 
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-        val resultData = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_RESULT_DATA)
+        }
         val roomId = intent.getStringExtra(EXTRA_ROOM_ID) ?: return
         val token = intent.getStringExtra(EXTRA_TOKEN) ?: return
         val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL) ?: return
@@ -110,7 +114,7 @@ class ScreenCaptureService : Service() {
         // Initialize LiveKit room & publishing
         serviceScope.launch {
             try {
-                connectAndPublish(serverUrl, token, quality, captureAudio)
+                connectAndPublish(serverUrl, token, quality, captureAudio, resultData)
             } catch (e: Exception) {
                 Log.e(TAG, "Error connecting LiveKit room: ${e.message}", e)
                 stopSelf()
@@ -122,30 +126,33 @@ class ScreenCaptureService : Service() {
         serverUrl: String,
         token: String,
         quality: String,
-        captureAudio: Boolean
+        captureAudio: Boolean,
+        permissionIntent: Intent
     ) {
         val room = LiveKit.create(applicationContext)
         liveKitRoom = room
 
-        // Configure video capture parameters based on user quality setting
-        val (width, height, fps, maxBitrate) = when (quality) {
-            "360p" -> VideoCaptureParameter(640, 360, 30, 700_000)
-            "480p" -> VideoCaptureParameter(854, 480, 30, 1_500_000)
-            "720p" -> VideoCaptureParameter(1280, 720, 30, 2_500_000)
-            else -> VideoCaptureParameter(1280, 720, 30, 1_800_000) // Auto
+        // Configure video capture parameters based on user quality setting (width, height, maxFps)
+        val (width, height, fps) = when (quality) {
+            "360p" -> Triple(640, 360, 30)
+            "480p" -> Triple(854, 480, 30)
+            "720p" -> Triple(1280, 720, 30)
+            else -> Triple(1280, 720, 30) // Auto defaults to 720p @ 30fps
         }
 
         // Connect room over WebRTC
         room.connect(serverUrl, token)
         Log.i(TAG, "Connected to LiveKit room: ${room.name}")
 
-        // Create Screen Share Video Track using the MediaProjection
-        val videoTrack = room.localParticipant.createScreenShareTrack(
-            options = LocalVideoTrackOptions(
-                isScreenShare = true,
-                captureParams = VideoCaptureParameter(width, height, fps, maxBitrate)
-            ),
-            mediaProjection = mediaProjection
+        // Create Screencast Track using the MediaProjection result intent and options
+        val trackOptions = LocalVideoTrackOptions(
+            isScreencast = true,
+            captureParams = VideoCaptureParameter(width, height, fps)
+        )
+        val videoTrack = room.localParticipant.createScreencastTrack(
+            name = "screen_share",
+            mediaProjectionPermissionResultData = permissionIntent,
+            options = trackOptions
         )
         screenVideoTrack = videoTrack
         room.localParticipant.publishVideoTrack(videoTrack)

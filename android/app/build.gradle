@@ -1,6 +1,6 @@
 plugins {
     id 'com.android.application'
-    id 'kotlin-android'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -42,5 +42,5 @@ dependencies {
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
 
     // LiveKit Android SDK for WebRTC screen share & audio streaming
-    implementation "io.livekit.android:livekit-android:2.11.0"
+    implementation "io.livekit:livekit-android:2.11.0"
 }
