@@ -1,0 +1,28 @@
+# Production .dockerignore for Gaming Hub
+# Excludes local node_modules, build caches, test emulators, android project, and secrets
+
+node_modules
+dist
+build
+coverage
+android
+.git
+.github
+.aistudio
+*.log
+
+# Secrets & Environment variables (Critical)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.keystore
+*service-account*.json
+credentials.json
+client_secret*.json
+
+# Test outputs & caches
+tests
+.cache
+.npm

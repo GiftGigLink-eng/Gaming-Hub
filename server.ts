@@ -36,7 +36,12 @@ function getPort(): number {
     const parsed = parseInt(process.argv[portArgIndex + 1], 10);
     if (!isNaN(parsed) && parsed > 0) return parsed;
   }
-  // If environment provides PORT but it is 8080 (reserved by internal proxy), enforce 3000
+  // In production (e.g. Cloud Run), honor process.env.PORT (typically 8080)
+  if (process.env.NODE_ENV === 'production' && process.env.PORT) {
+    const parsed = parseInt(process.env.PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  // In development, if environment provides PORT but it is 8080 (reserved by internal dev proxy), enforce 3000
   if (process.env.PORT && process.env.PORT !== '8080') {
     const parsed = parseInt(process.env.PORT, 10);
     if (!isNaN(parsed) && parsed > 0) return parsed;
