@@ -15,6 +15,14 @@ import {
   ChatUnauthorizedError,
   ChatRateLimitError,
   RoomValidationError,
+  RoomSecurityConfigurationError,
+  RoomCapacityFullError,
+  InvalidAccessCodeError,
+  InviteNotFoundError,
+  InviteRevokedError,
+  InviteExpiredError,
+  InviteUsageLimitExceededError,
+  MalformedCursorError,
   ensureFirestoreService,
 } from './src/server/firestoreRepository.js';
 import { paystackService } from './src/server/paystackService.js';
@@ -22,6 +30,7 @@ import { gamesCatalogService } from './src/server/gamesCatalog.js';
 import { authenticateFirebaseUser, AuthenticatedRequest, verifyFirebaseIdToken } from './src/server/firebaseAdmin.js';
 import { legacySessionStartHandler } from './src/server/legacySession.js';
 import { livekitService, LiveKitCredentialsMissingError, UnauthorizedStreamHostError } from './src/server/livekitService.js';
+import { PrivateRoomPreview } from './src/types.js';
 
 dotenv.config();
 
@@ -488,7 +497,7 @@ app.post('/api/rooms', authenticateFirebaseUser, async (req: AuthenticatedReques
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
     const userName = userProfile?.displayName || 'Player';
-    const { gameId, gameTitle, title } = req.body;
+    const { gameId, gameTitle, title, visibility, pin, maxParticipants } = req.body;
 
     if (!gameId) {
       return res.status(400).json({ success: false, error: 'gameId is required' });
@@ -497,29 +506,48 @@ app.post('/api/rooms', authenticateFirebaseUser, async (req: AuthenticatedReques
       return res.status(400).json({ success: false, error: 'title is required' });
     }
 
-    const room = await firestoreRepo.createRoom(userId, userName, gameId, gameTitle || gameId, title);
-    res.status(201).json({ success: true, room });
+    const result = await firestoreRepo.createRoom(
+      userId,
+      userName,
+      gameId,
+      gameTitle || gameId,
+      title,
+      visibility || 'public',
+      pin,
+      maxParticipants
+    );
+
+    res.status(201).json({ success: true, room: result.room, pin: result.pin });
   } catch (err: any) {
     if (err instanceof RoomValidationError) {
       return res.status(400).json({ success: false, error: err.message, code: 'VALIDATION_ERROR' });
+    }
+    if (err instanceof RoomSecurityConfigurationError) {
+      return res.status(500).json({ success: false, error: err.message, code: 'SECURITY_CONFIG_ERROR' });
     }
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// List Rooms (Public/Authenticated)
+// List Rooms (Public/Authenticated) - Deterministic dual-stream query with Base64URL cursor
 app.get('/api/rooms', async (req: Request, res: Response) => {
   try {
     const gameId = req.query.gameId as string | undefined;
     const status = req.query.status as any;
-    const rooms = await firestoreRepo.listRooms(gameId, status);
-    res.json({ success: true, rooms });
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+    const cursor = req.query.cursor as string | undefined;
+
+    const result = await firestoreRepo.listRooms(gameId, status, limit, cursor);
+    res.json({ success: true, rooms: result.rooms, nextCursor: result.nextCursor });
   } catch (err: any) {
+    if (err instanceof MalformedCursorError) {
+      return res.status(400).json({ success: false, error: err.message, code: 'MALFORMED_CURSOR' });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Get Single Room
+// Get Single Room (With Private Room Preview Sanitization)
 app.get('/api/rooms/:roomId', async (req: Request, res: Response) => {
   try {
     const { roomId } = req.params;
@@ -527,25 +555,224 @@ app.get('/api/rooms/:roomId', async (req: Request, res: Response) => {
     if (!room) {
       return res.status(404).json({ success: false, error: 'Room not found', code: 'ROOM_NOT_FOUND' });
     }
-    res.json({ success: true, room });
+
+    // Check if room is private
+    if (room.visibility === 'private') {
+      // Check caller's authentication token if provided
+      let callerUid: string | null = null;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split('Bearer ')[1]?.trim();
+        if (token) {
+          const verified = await verifyFirebaseIdToken(token);
+          if (verified) callerUid = verified.uid;
+        }
+      }
+
+      const isHost = callerUid && room.hostId === callerUid;
+      const isMember = callerUid && room.participants && Boolean(room.participants[callerUid]);
+
+      if (!isHost && !isMember) {
+        // Return strictly sanitized PrivateRoomPreview (Zero-Knowledge)
+        const preview: PrivateRoomPreview = {
+          id: room.id,
+          title: room.title,
+          gameId: room.gameId,
+          gameTitle: room.gameTitle,
+          status: room.status,
+          visibility: 'private',
+          participantCount: room.participantCount,
+          maxParticipants: room.maxParticipants,
+          requiresPin: Boolean(room.accessCodeHash),
+          createdAt: room.createdAt,
+        };
+        return res.json({ success: true, room: preview, isPreview: true });
+      }
+    }
+
+    // Strip internal accessCodeHash before sending full room to members/host
+    const sanitizedRoom = { ...room };
+    delete (sanitizedRoom as any).accessCodeHash;
+
+    res.json({ success: true, room: sanitizedRoom, isPreview: false });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Join Room (Protected)
+// Reset Room PIN (Host Only)
+app.post('/api/rooms/:roomId/pin/reset', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const { roomId } = req.params;
+    const { pin } = req.body;
+
+    const result = await firestoreRepo.resetRoomPin(roomId, userId, pin);
+    const sanitizedRoom = { ...result.room };
+    delete (sanitizedRoom as any).accessCodeHash;
+
+    res.json({ success: true, room: sanitizedRoom, pin: result.pin, message: 'Room PIN successfully reset.' });
+  } catch (err: any) {
+    if (err instanceof RoomValidationError) {
+      return res.status(400).json({ success: false, error: err.message, code: 'VALIDATION_ERROR' });
+    }
+    if (err instanceof UnauthorizedHostActionError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'FORBIDDEN_NOT_HOST' });
+    }
+    if (err instanceof RoomNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    if (err instanceof RoomSecurityConfigurationError) {
+      return res.status(500).json({ success: false, error: err.message, code: 'SECURITY_CONFIG_ERROR' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Join Room (Protected) - Universal Capacity & Scrypt PIN Verification
 app.post('/api/rooms/:roomId/join', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
     const userName = userProfile?.displayName || 'Player';
     const { roomId } = req.params;
+    const { pin } = req.body;
 
-    const room = await firestoreRepo.joinRoom(roomId, userId, userName);
-    res.json({ success: true, room });
+    const room = await firestoreRepo.joinRoom(roomId, userId, userName, pin);
+    const sanitizedRoom = { ...room };
+    delete (sanitizedRoom as any).accessCodeHash;
+
+    res.json({ success: true, room: sanitizedRoom });
   } catch (err: any) {
     if (err instanceof RoomNotFoundError) {
       return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    if (err instanceof RoomEndedError) {
+      return res.status(400).json({ success: false, error: err.message, code: 'ROOM_ENDED' });
+    }
+    if (err instanceof InvalidAccessCodeError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'INVALID_PIN' });
+    }
+    if (err instanceof RoomCapacityFullError) {
+      return res.status(409).json({ success: false, error: err.message, code: 'CAPACITY_REACHED' });
+    }
+    if (err instanceof RoomSecurityConfigurationError) {
+      return res.status(500).json({ success: false, error: err.message, code: 'SECURITY_CONFIG_ERROR' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Create Room Invitation (Host Only)
+app.post('/api/rooms/:roomId/invitations', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const { roomId } = req.params;
+    const { label, maxUses, expiresInHours } = req.body;
+
+    const result = await firestoreRepo.createInvitation(roomId, userId, label, maxUses, expiresInHours);
+    res.status(201).json({
+      success: true,
+      invitation: result.invitation,
+      rawToken: result.rawToken,
+      inviteUrl: `/rooms/${roomId}?token=${result.rawToken}`,
+    });
+  } catch (err: any) {
+    if (err instanceof UnauthorizedHostActionError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'FORBIDDEN_NOT_HOST' });
+    }
+    if (err instanceof RoomNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    if (err instanceof RoomEndedError) {
+      return res.status(400).json({ success: false, error: err.message, code: 'ROOM_ENDED' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// List Room Invitations (Host Only)
+app.get('/api/rooms/:roomId/invitations', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const { roomId } = req.params;
+
+    const invitations = await firestoreRepo.listInvitations(roomId, userId);
+    res.json({ success: true, invitations });
+  } catch (err: any) {
+    if (err instanceof UnauthorizedHostActionError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'FORBIDDEN_NOT_HOST' });
+    }
+    if (err instanceof RoomNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Revoke Room Invitation (Host Only)
+app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const { roomId, invitationId } = req.params;
+
+    const updated = await firestoreRepo.revokeInvitation(roomId, invitationId, userId);
+    res.json({ success: true, invitation: updated, message: 'Invitation revoked successfully.' });
+  } catch (err: any) {
+    if (err instanceof UnauthorizedHostActionError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'FORBIDDEN_NOT_HOST' });
+    }
+    if (err instanceof InviteNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'INVITE_NOT_FOUND' });
+    }
+    if (err instanceof RoomNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Redeem Invitation Atomically (Protected)
+app.post('/api/rooms/:roomId/invitations/redeem', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.uid;
+    const userProfile = await firestoreRepo.getUser(userId);
+    const userName = userProfile?.displayName || 'Player';
+    const { roomId } = req.params;
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Invitation token is required.', code: 'TOKEN_REQUIRED' });
+    }
+
+    const result = await firestoreRepo.redeemInvitation(roomId, token, userId, userName);
+    const sanitizedRoom = { ...result.room };
+    delete (sanitizedRoom as any).accessCodeHash;
+
+    res.json({
+      success: true,
+      room: sanitizedRoom,
+      alreadyMember: result.alreadyMember,
+      message: result.alreadyMember ? 'Welcome back! You are already a member.' : 'Successfully joined room!',
+    });
+  } catch (err: any) {
+    if (err instanceof RoomNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    if (err instanceof InviteNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'INVITE_NOT_FOUND' });
+    }
+    if (err instanceof InviteRevokedError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'INVITE_REVOKED' });
+    }
+    if (err instanceof InviteExpiredError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'INVITE_EXPIRED' });
+    }
+    if (err instanceof InviteUsageLimitExceededError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'USAGE_LIMIT_EXCEEDED' });
+    }
+    if (err instanceof RoomCapacityFullError) {
+      return res.status(409).json({ success: false, error: err.message, code: 'CAPACITY_REACHED' });
     }
     if (err instanceof RoomEndedError) {
       return res.status(400).json({ success: false, error: err.message, code: 'ROOM_ENDED' });
@@ -719,6 +946,19 @@ app.post('/api/rooms/:roomId/livekit-token', authenticateFirebaseUser, async (re
       req.body?.publish || req.body?.asHost || req.body?.isHost || req.body?.role === 'host'
     );
 
+    // Verify private room streaming authorization
+    if (room.visibility === 'private') {
+      const isHost = room.hostId === userId;
+      const isParticipant = Boolean(room.participants && room.participants[userId]);
+      if (!isHost && !isParticipant) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: You must be an authorized member of this private room to access live stream audio/video.',
+          code: 'PRIVATE_ROOM_UNAUTHORIZED',
+        });
+      }
+    }
+
     const tokenData = await livekitService.generateRoomToken(room, userId, userName, requestPublish);
     res.json({
       success: true,
@@ -775,20 +1015,36 @@ app.post('/api/rooms/:roomId/messages', authenticateFirebaseUser, async (req: Au
   }
 });
 
-// Get Messages (Protected / Participants)
-app.get('/api/rooms/:roomId/messages', async (req: Request, res: Response) => {
+// Get Messages (Protected, Active Room Participants Only)
+app.get('/api/rooms/:roomId/messages', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const userId = req.user!.uid;
     const { roomId } = req.params;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
-    const messages = await firestoreRepo.getMessages(roomId, limit);
+    const messages = await firestoreRepo.getMessages(roomId, userId, limit);
     res.json({ success: true, messages });
   } catch (err: any) {
+    if (err instanceof RoomValidationError) {
+      return res.status(400).json({ success: false, error: err.message, code: 'VALIDATION_ERROR' });
+    }
+    if (err instanceof ChatUnauthorizedError) {
+      return res.status(403).json({ success: false, error: err.message, code: 'NOT_A_PARTICIPANT' });
+    }
+    if (err instanceof RoomNotFoundError) {
+      return res.status(404).json({ success: false, error: err.message, code: 'ROOM_NOT_FOUND' });
+    }
+    if (err instanceof RoomEndedError) {
+      return res.status(400).json({ success: false, error: err.message, code: 'ROOM_ENDED' });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// In-app Test Runner Endpoint for live QA verification
+// In-app Test Runner Endpoint for live QA verification (Strictly disabled in production)
 app.post('/api/tests/run', async (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ success: false, error: 'Endpoint not available in production.', code: 'NOT_FOUND' });
+  }
   try {
     const { runAllTests } = await import('./tests/gaming_hub.test.js');
     await runAllTests();

@@ -19,6 +19,7 @@ import {
   Tv,
   Copy,
   Check,
+  Lock,
 } from 'lucide-react';
 import { MatchRoom, SupportedGame, UserProfile } from '../types.js';
 import { authFetch } from '../lib/firebase.js';
@@ -67,13 +68,19 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [createGameId, setCreateGameId] = useState(supportedGames[0]?.id || 'freefire');
   const [createTitle, setCreateTitle] = useState('');
+  const [createVisibility, setCreateVisibility] = useState<'public' | 'private'>('public');
+  const [createCapacity, setCreateCapacity] = useState<number>(4);
+  const [createPin, setCreatePin] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [createdRoomPin, setCreatedRoomPin] = useState<{ pin: string; roomId: string } | null>(null);
 
-  // Direct Join by Code state
+  // Direct Join by Code / PIN prompt state
   const [joinCode, setJoinCode] = useState('');
+  const [joinPin, setJoinPin] = useState('');
   const [isJoiningCode, setIsJoiningCode] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [pinPromptRoomId, setPinPromptRoomId] = useState<string | null>(null);
 
   const fetchRooms = useCallback(async () => {
     try {
@@ -138,6 +145,9 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
           gameId: createGameId,
           gameTitle,
           title,
+          visibility: createVisibility,
+          maxParticipants: createCapacity,
+          pin: createVisibility === 'private' ? createPin : undefined,
         }),
       });
 
@@ -148,7 +158,12 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
 
       setIsCreateOpen(false);
       setCreateTitle('');
+      setCreatePin('');
       fetchRooms();
+
+      if (data.pin) {
+        setCreatedRoomPin({ pin: data.pin, roomId: data.room.id });
+      }
       onSelectRoom(data.room);
     } catch (err: any) {
       setCreateError(err.message || 'Error creating room.');
@@ -174,13 +189,24 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
     try {
       const res = await authFetch(`/api/rooms/${formattedId}/join`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pin: joinPin.trim() || undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
+        if (data.code === 'INVALID_PIN' && !joinPin) {
+          setPinPromptRoomId(formattedId);
+          setJoinError('This room is private. Please enter the room PIN below.');
+          return;
+        }
         throw new Error(data.error || 'Failed to join room.');
       }
 
       setJoinCode('');
+      setJoinPin('');
+      setPinPromptRoomId(null);
       onSelectRoom(data.room);
     } catch (err: any) {
       setJoinError(err.message || 'Room not found or could not be joined.');
@@ -305,23 +331,37 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
       <div className="p-3.5 rounded-2xl bg-[#0E121E] border border-white/[0.06] flex flex-col sm:flex-row items-center gap-3">
         <div className="flex items-center gap-2 text-xs font-bold text-zinc-300 shrink-0">
           <KeyRound className="w-4 h-4 text-emerald-400" />
-          <span>Have a Room Code?</span>
+          <span>Have a Room Code or Invite?</span>
         </div>
-        <form onSubmit={handleJoinByCode} className="flex-1 flex items-center gap-2 w-full">
+        <form onSubmit={handleJoinByCode} className="flex-1 flex flex-col sm:flex-row items-center gap-2 w-full">
           <input
             type="text"
-            placeholder="Enter code (e.g. 9f2a81 or rm_9f2a81)"
+            placeholder="Room code (e.g. 9F2A81 or rm_9f2a81)"
             value={joinCode}
             onChange={(e) => {
               setJoinCode(e.target.value);
               setJoinError(null);
             }}
-            className="flex-1 bg-zinc-900 border border-white/[0.08] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-emerald-500 font-mono uppercase"
+            className="flex-1 w-full bg-zinc-900 border border-white/[0.08] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-emerald-500 font-mono uppercase"
           />
+          {pinPromptRoomId && (
+            <input
+              type="password"
+              placeholder="Enter PIN (4-8 digits)"
+              value={joinPin}
+              onChange={(e) => {
+                setJoinPin(e.target.value);
+                setJoinError(null);
+              }}
+              maxLength={8}
+              className="w-full sm:w-36 bg-zinc-900 border border-amber-500/50 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-amber-400 font-mono tracking-widest"
+              autoFocus
+            />
+          )}
           <button
             type="submit"
             disabled={!joinCode.trim() || isJoiningCode}
-            className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white font-bold text-xs transition-colors shrink-0 cursor-pointer"
+            className="w-full sm:w-auto px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white font-bold text-xs transition-colors shrink-0 cursor-pointer"
           >
             {isJoiningCode ? 'Joining...' : 'Join'}
           </button>
@@ -330,6 +370,39 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
           <span className="text-[11px] text-rose-400 font-medium">{joinError}</span>
         )}
       </div>
+
+      {/* Created Private Room PIN Display-Once Modal */}
+      {createdRoomPin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="w-full max-w-sm bg-[#0E121E] border border-amber-500/40 rounded-3xl p-6 shadow-2xl space-y-4 animate-in fade-in">
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mx-auto">
+              <Lock className="w-6 h-6" />
+            </div>
+            <div className="text-center space-y-1">
+              <h3 className="text-base font-black text-white">Private Room PIN</h3>
+              <p className="text-xs text-zinc-400">
+                Copy your room PIN now. For zero-knowledge security, this PIN is never stored in readable text and cannot be viewed again.
+              </p>
+            </div>
+            <div className="p-4 rounded-2xl bg-zinc-950 border border-white/[0.08] text-center font-mono font-black text-2xl text-amber-400 tracking-widest">
+              {createdRoomPin.pin}
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(createdRoomPin.pin);
+                  setCreatedRoomPin(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy & Proceed</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Search & Filter Controls */}
       <div className="flex flex-col md:flex-row gap-2.5">
@@ -620,6 +693,79 @@ export const LiveRoomsHub: React.FC<LiveRoomsHubProps> = ({
                   <span>{createTitle.trim().length}/60</span>
                 </div>
               </div>
+
+              {/* Visibility: Public vs Private */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-zinc-300">Room Privacy</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCreateVisibility('public')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                      createVisibility === 'public'
+                        ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
+                        : 'bg-zinc-900 border-white/[0.06] text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <span>Public Lobby</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreateVisibility('private')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                      createVisibility === 'private'
+                        ? 'bg-amber-500/10 border-amber-500/50 text-amber-400'
+                        : 'bg-zinc-900 border-white/[0.06] text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Private Room</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Squad Player Capacity */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-xs">
+                  <label className="font-bold text-zinc-300">Squad Player Capacity</label>
+                  <span className="font-mono text-emerald-400 font-bold">{createCapacity} Players</span>
+                </div>
+                <input
+                  type="range"
+                  min="2"
+                  max="16"
+                  value={createCapacity}
+                  onChange={(e) => setCreateCapacity(parseInt(e.target.value, 10))}
+                  className="w-full accent-emerald-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-zinc-500">
+                  <span>2 (1v1)</span>
+                  <span>4 (Squad)</span>
+                  <span>8 (Custom)</span>
+                  <span>16 (Max)</span>
+                </div>
+              </div>
+
+              {/* Optional Custom PIN for Private Room */}
+              {createVisibility === 'private' && (
+                <div className="space-y-1.5 p-3 rounded-xl bg-amber-950/20 border border-amber-900/40">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Room Access PIN (Optional)</span>
+                  </div>
+                  <input
+                    type="password"
+                    placeholder="Leave blank to auto-generate a 6-digit PIN"
+                    value={createPin}
+                    onChange={(e) => setCreatePin(e.target.value)}
+                    maxLength={8}
+                    className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-amber-400 font-mono tracking-wider"
+                  />
+                  <p className="text-[10px] text-zinc-400 leading-normal">
+                    Private rooms will not appear in the public lobby. Players can only join with this PIN or your invitation link.
+                  </p>
+                </div>
+              )}
 
               <div className="p-3 rounded-xl bg-zinc-900/60 border border-white/[0.04] text-[11px] text-zinc-400 space-y-1">
                 <div className="flex items-center gap-1.5 text-zinc-300 font-bold">

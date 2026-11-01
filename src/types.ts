@@ -142,6 +142,7 @@ export interface LaunchAuthorizationResponse {
 
 // Live Rooms & Real-Time Chat Types
 export type RoomStatus = 'waiting' | 'live' | 'ended';
+export type RoomVisibility = 'public' | 'private';
 
 export interface RoomParticipant {
   userId: string;
@@ -164,6 +165,38 @@ export interface RoomViewer {
   lastSeenAt: string;
 }
 
+export interface RoomInvitation {
+  id: string;                      // e.g. "inv_8a7b6c5d"
+  roomId: string;
+  createdBy: string;               // Host UID
+  tokenHash: string;               // HMAC-SHA256 of the invitation token
+  label: string;                   // e.g. "Tournament Squad A"
+  maxUses: number | null;          // null = unlimited, or integer >= 1
+  usedCount: number;               // Current redemptions
+  expiresAt: string | null;        // ISO 8601 timestamp or null
+  isRevoked: boolean;              // Immediate manual revocation flag
+  createdAt: string;
+  revokedAt?: string | null;
+}
+
+export interface PrivateRoomPreview {
+  id: string;
+  title: string;
+  gameId: string;
+  gameTitle: string;
+  status: RoomStatus;
+  visibility: 'private';
+  participantCount: number;
+  maxParticipants?: number;
+  requiresPin: boolean;
+  createdAt: string;
+}
+
+export interface RoomPaginationCursor {
+  createdAt: string;
+  documentId: string;
+}
+
 export interface MatchRoom {
   id: string;
   hostId: string;
@@ -172,6 +205,9 @@ export interface MatchRoom {
   gameTitle: string;
   title: string;
   status: RoomStatus;
+  visibility?: RoomVisibility;      // Optional for legacy rooms (defaults to 'public')
+  maxParticipants?: number;         // Max squad capacity (2-16)
+  accessCodeHash?: string | null;  // Scrypt hash with salt and version tag
   participantCount: number;
   participants: Record<string, RoomParticipant>;
   stream?: RoomStreamState;
@@ -189,3 +225,4 @@ export interface ChatMessage {
   text: string;
   createdAt: string;
 }
+

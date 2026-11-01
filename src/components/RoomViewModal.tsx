@@ -19,8 +19,11 @@ import {
   Tv,
   MessageSquare,
   UserPlus,
+  Lock,
+  KeyRound,
+  Link,
 } from 'lucide-react';
-import { MatchRoom, ChatMessage, UserProfile, RoomViewer } from '../types.js';
+import { MatchRoom, ChatMessage, UserProfile, RoomViewer, RoomInvitation } from '../types.js';
 import { authFetch, db } from '../lib/firebase.js';
 import { collection, query, orderBy, limit, onSnapshot, doc } from 'firebase/firestore';
 import { StreamPlayerArea } from './StreamPlayerArea.js';
@@ -45,10 +48,26 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
   const [chatError, setChatError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [activeTab, setActiveTab] = useState<'stream' | 'chat' | 'roster'>('stream');
+  const [activeTab, setActiveTab] = useState<'stream' | 'chat' | 'roster' | 'privacy'>('stream');
   const [isClosingRoom, setIsClosingRoom] = useState(false);
   const [isJoiningSquad, setIsJoiningSquad] = useState(false);
   const [rateLimitCooldown, setRateLimitCooldown] = useState(0);
+
+  // Host Invitation & Privacy State
+  const [invitations, setInvitations] = useState<RoomInvitation[]>([]);
+  const [isLoadingInvites, setIsLoadingInvites] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [newInviteLabel, setNewInviteLabel] = useState('');
+  const [newInviteMaxUses, setNewInviteMaxUses] = useState('');
+  const [newInviteExpiresHours, setNewInviteExpiresHours] = useState('');
+  const [createdInvitePlainToken, setCreatedInvitePlainToken] = useState<string | null>(null);
+  const [isCreatingInvite, setIsCreatingInvite] = useState(false);
+  const [copiedInviteUrl, setCopiedInviteUrl] = useState(false);
+
+  // Host PIN Reset State
+  const [resetPinValue, setResetPinValue] = useState('');
+  const [resetPinStatus, setResetPinStatus] = useState<string | null>(null);
+  const [isResettingPin, setIsResettingPin] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -119,7 +138,7 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
         async (error) => {
           console.warn('[onSnapshot fallback to API poll]:', error.message);
           try {
-            const res = await fetch(`/api/rooms/${roomId}/messages`);
+            const res = await authFetch(`/api/rooms/${roomId}/messages`);
             const data = await res.json();
             if (data.success && Array.isArray(data.messages)) {
               setMessages(data.messages);
@@ -334,6 +353,111 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
     }
   };
 
+  const fetchInvitations = useCallback(async () => {
+    if (!currentRoom?.id || !isHost) return;
+    setIsLoadingInvites(true);
+    setInviteError(null);
+    try {
+      const res = await authFetch(`/api/rooms/${currentRoom.id}/invitations`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.invitations)) {
+        setInvitations(data.invitations);
+      } else {
+        setInviteError(data.error || 'Failed to load invitations');
+      }
+    } catch (err: any) {
+      setInviteError(err.message || 'Error loading invitations');
+    } finally {
+      setIsLoadingInvites(false);
+    }
+  }, [currentRoom?.id, isHost]);
+
+  useEffect(() => {
+    if (activeTab === 'privacy' && isHost) {
+      fetchInvitations();
+    }
+  }, [activeTab, isHost, fetchInvitations]);
+
+  const handleCreateInvitation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentRoom?.id || !isHost) return;
+    setIsCreatingInvite(true);
+    setInviteError(null);
+    try {
+      const payload: Record<string, any> = {};
+      if (newInviteLabel.trim()) payload.label = newInviteLabel.trim();
+      const parsedUses = parseInt(newInviteMaxUses.trim(), 10);
+      if (!isNaN(parsedUses) && parsedUses > 0) payload.maxUses = parsedUses;
+      const parsedHours = parseInt(newInviteExpiresHours.trim(), 10);
+      if (!isNaN(parsedHours) && parsedHours > 0) payload.expiresInHours = parsedHours;
+
+      const res = await authFetch(`/api/rooms/${currentRoom.id}/invitations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to generate invitation');
+      }
+      setCreatedInvitePlainToken(data.invitation.token);
+      setNewInviteLabel('');
+      setNewInviteMaxUses('');
+      setNewInviteExpiresHours('');
+      fetchInvitations();
+    } catch (err: any) {
+      setInviteError(err.message);
+    } finally {
+      setIsCreatingInvite(false);
+    }
+  };
+
+  const handleRevokeInvitation = async (invitationId: string) => {
+    if (!currentRoom?.id || !isHost) return;
+    try {
+      const res = await authFetch(`/api/rooms/${currentRoom.id}/invitations/${invitationId}/revoke`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchInvitations();
+      } else {
+        setInviteError(data.error || 'Failed to revoke invitation');
+      }
+    } catch (err: any) {
+      setInviteError(err.message);
+    }
+  };
+
+  const handleResetPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentRoom?.id || !isHost) return;
+    setIsResettingPin(true);
+    setResetPinStatus(null);
+    try {
+      const res = await authFetch(`/api/rooms/${currentRoom.id}/pin/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newPin: resetPinValue.trim() || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to update PIN');
+      }
+      setResetPinStatus(data.message || 'Room PIN successfully updated.');
+      setResetPinValue('');
+      if (data.room) {
+        setCurrentRoom(data.room);
+        onRoomUpdated(data.room);
+      }
+    } catch (err: any) {
+      setResetPinStatus(`Error: ${err.message}`);
+    } finally {
+      setIsResettingPin(false);
+    }
+  };
+
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/90 backdrop-blur-md animate-in fade-in duration-200">
       <div className="relative w-full max-w-4xl bg-[#0E121E] border border-white/[0.08] rounded-3xl overflow-hidden shadow-2xl flex flex-col h-[94vh] max-h-[820px]">
@@ -355,6 +479,23 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                   <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
                 )}
                 <span>{currentRoom.status === 'live' ? 'Match Live' : 'Waiting for Squad'}</span>
+              </span>
+
+              <span
+                className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                  currentRoom.visibility === 'private'
+                    ? 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                    : 'bg-zinc-900 text-zinc-400 border border-zinc-800'
+                }`}
+              >
+                {currentRoom.visibility === 'private' ? (
+                  <>
+                    <Lock className="w-2.5 h-2.5 text-amber-400" />
+                    <span>Private</span>
+                  </>
+                ) : (
+                  <span>Public</span>
+                )}
               </span>
 
               {currentRoom.stream?.isLive && (
@@ -391,6 +532,14 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                 <span className="flex items-center gap-1 font-mono text-emerald-400">
                   <Eye className="w-3 h-3" />
                   <span>{currentRoom.viewerCount || 0} watching</span>
+                </span>
+                <span className="text-zinc-600">•</span>
+                <span className="flex items-center gap-1 font-mono text-zinc-400">
+                  <Users className="w-3 h-3 text-indigo-400" />
+                  <span>
+                    {participantList.length}
+                    {currentRoom.maxParticipants ? `/${currentRoom.maxParticipants}` : ''} players
+                  </span>
                 </span>
               </div>
             </div>
@@ -459,6 +608,22 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                 Squad ({participantList.length}) • Viewers ({currentRoom.viewerCount || 0})
               </span>
             </button>
+
+            {isHost && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('privacy')}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
+                  activeTab === 'privacy'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-400" />
+                <span>Invites & Privacy</span>
+              </button>
+            )}
+          </div>
           </div>
         </div>
 
@@ -811,6 +976,280 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                       </span>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Tab 4: Host Privacy & Invitations Management */}
+        {activeTab === 'privacy' && isHost && (
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 bg-[#0A0D17]">
+            {/* Header / Room Overview */}
+            <div className="p-4 rounded-2xl bg-zinc-900/70 border border-white/[0.06] flex flex-wrap items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Room Security & Privacy</span>
+                </div>
+                <div className="text-sm font-black text-white">
+                  Visibility: <span className="capitalize text-emerald-400">{currentRoom.visibility || 'public'}</span>
+                  {currentRoom.accessCodeHash ? ' • Protected by PIN' : ' • No PIN'}
+                </div>
+                <div className="text-xs text-zinc-400">
+                  Player Capacity: <span className="text-white font-bold">{participantList.length}</span> / {currentRoom.maxParticipants ?? 'Unlimited'} allowed squad members
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] px-2.5 py-1 rounded-full bg-zinc-800 border border-white/10 text-zinc-300 font-mono">
+                  Room ID: {currentRoom.id}
+                </span>
+              </div>
+            </div>
+
+            {/* PIN Management */}
+            <div className="p-4 rounded-2xl bg-zinc-900/60 border border-white/[0.06] space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-amber-400" />
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                    {currentRoom.accessCodeHash ? 'Rotate or Clear Room PIN' : 'Set Room Access PIN'}
+                  </h3>
+                </div>
+                <span className="text-[10px] text-zinc-400">Scrypt + Secret Pepper Hash</span>
+              </div>
+              <p className="text-xs text-zinc-400">
+                A 4 to 6 digit numeric code required for players joining without a direct invitation link.
+              </p>
+
+              <form onSubmit={handleResetPin} className="flex flex-wrap items-center gap-2">
+                <input
+                  type="password"
+                  maxLength={6}
+                  pattern="[0-9]*"
+                  inputMode="numeric"
+                  placeholder="New 4-6 digit PIN (leave blank to remove PIN)"
+                  value={resetPinValue}
+                  onChange={(e) => setResetPinValue(e.target.value.replace(/\D/g, ''))}
+                  className="px-3 py-2 rounded-xl bg-zinc-950 border border-white/10 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-amber-500 font-mono w-64"
+                />
+                <button
+                  type="submit"
+                  disabled={isResettingPin}
+                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs transition-colors cursor-pointer flex items-center gap-1.5 shadow-md shadow-amber-500/20"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>{isResettingPin ? 'Updating...' : resetPinValue ? 'Set PIN' : 'Remove PIN'}</span>
+                </button>
+              </form>
+
+              {resetPinStatus && (
+                <div className="p-2.5 rounded-xl bg-zinc-950/80 border border-amber-500/30 text-xs text-amber-300 font-mono flex items-center gap-2">
+                  <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>{resetPinStatus}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Cryptographic Invitations Generator */}
+            <div className="p-4 rounded-2xl bg-zinc-900/60 border border-white/[0.06] space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Link className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                    Generate Invitation Link
+                  </h3>
+                </div>
+                <span className="text-[10px] text-zinc-400">Single-use, Expiring, or Multi-use</span>
+              </div>
+
+              {inviteError && (
+                <div className="p-2.5 rounded-xl bg-rose-950/80 border border-rose-800 text-rose-300 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{inviteError}</span>
+                </div>
+              )}
+
+              {/* Newly Created Plaintext Invite Token Notification */}
+              {createdInvitePlainToken && (
+                <div className="p-3.5 rounded-2xl bg-emerald-950/80 border border-emerald-500/40 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-emerald-300">
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Invitation Link Generated! (Display Once)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setCreatedInvitePlainToken(null)}
+                      className="text-zinc-400 hover:text-white text-[10px]"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-zinc-300">
+                    This cryptographic token is securely hashed on the server. Copy this link now:
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={`${window.location.origin}?inviteToken=${createdInvitePlainToken}`}
+                      className="flex-1 px-3 py-1.5 rounded-xl bg-black/60 border border-emerald-500/30 text-xs text-emerald-200 font-mono select-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(
+                          `${window.location.origin}?inviteToken=${createdInvitePlainToken}`
+                        );
+                        setCopiedInviteUrl(true);
+                        setTimeout(() => setCopiedInviteUrl(false), 2000);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      {copiedInviteUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedInviteUrl ? 'Copied' : 'Copy Link'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <form onSubmit={handleCreateInvitation} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
+                    Label (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Squad Discord"
+                    value={newInviteLabel}
+                    onChange={(e) => setNewInviteLabel(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-white/10 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
+                    Max Uses (Blank = Unlimited)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    placeholder="e.g. 1 (Single Use)"
+                    value={newInviteMaxUses}
+                    onChange={(e) => setNewInviteMaxUses(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-white/10 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
+                    Expires In Hours (Blank = Never)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    placeholder="e.g. 24"
+                    value={newInviteExpiresHours}
+                    onChange={(e) => setNewInviteExpiresHours(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-white/10 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+                <div className="sm:col-span-3 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isCreatingInvite}
+                    className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs transition-colors cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-500/20"
+                  >
+                    <Link className="w-3.5 h-3.5" />
+                    <span>{isCreatingInvite ? 'Generating...' : 'Create Invitation Link'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Active Invitations List */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Existing Invitations ({invitations.length})</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchInvitations}
+                  disabled={isLoadingInvites}
+                  className="text-xs text-zinc-400 hover:text-white flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isLoadingInvites ? 'animate-spin' : ''}`} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+
+              {invitations.length === 0 ? (
+                <div className="p-4 rounded-xl bg-zinc-900/40 border border-white/5 text-center text-xs text-zinc-500">
+                  No invitations generated yet. Create one above to invite players to this private match room.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {invitations.map((inv) => {
+                    const isRevoked = inv.status === 'revoked';
+                    const isExpired = inv.expiresAt ? Date.now() > inv.expiresAt : false;
+                    const isExhausted = inv.maxUses ? inv.usedCount >= inv.maxUses : false;
+                    const isActive = !isRevoked && !isExpired && !isExhausted;
+
+                    return (
+                      <div
+                        key={inv.id}
+                        className="p-3 rounded-xl bg-zinc-900/60 border border-white/[0.06] flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-xs text-white truncate">
+                              {inv.label || 'Standard Invite'}
+                            </span>
+                            <span
+                              className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
+                                isActive
+                                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                  : isRevoked
+                                  ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                                  : 'bg-zinc-800 text-zinc-400'
+                              }`}
+                            >
+                              {isRevoked ? 'Revoked' : isExpired ? 'Expired' : isExhausted ? 'Max Uses Reached' : 'Active'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-zinc-400 flex items-center gap-2 font-mono">
+                            <span>
+                              Uses: {inv.usedCount}
+                              {inv.maxUses ? `/${inv.maxUses}` : ' (Unlimited)'}
+                            </span>
+                            <span>•</span>
+                            <span>
+                              {inv.expiresAt
+                                ? `Expires: ${new Date(inv.expiresAt).toLocaleString([], {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}`
+                                : 'No Expiration'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {isActive && (
+                          <button
+                            type="button"
+                            onClick={() => handleRevokeInvitation(inv.id)}
+                            className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-rose-950 border border-white/5 hover:border-rose-800 text-zinc-400 hover:text-rose-300 text-[10px] font-bold transition-colors cursor-pointer shrink-0"
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

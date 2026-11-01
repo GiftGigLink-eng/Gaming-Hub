@@ -2,7 +2,7 @@ if (process.env.NODE_ENV === 'test' && !process.env.FIRESTORE_EMULATOR_HOST) {
   process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8085';
 }
 
-import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { getFirestore, Firestore, FieldPath } from 'firebase-admin/firestore';
 import { adminApp } from './firebaseAdmin.js';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
@@ -18,6 +18,10 @@ import {
   RoomStatus,
   RoomStreamState,
   RoomViewer,
+  RoomVisibility,
+  RoomInvitation,
+  PrivateRoomPreview,
+  RoomPaginationCursor,
 } from '../types.js';
 import crypto from 'crypto';
 import http from 'http';
@@ -158,6 +162,62 @@ export class RoomValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'RoomValidationError';
+  }
+}
+
+export class RoomSecurityConfigurationError extends Error {
+  constructor(message = 'Server secret configuration is missing. Private room creation is temporarily disabled.') {
+    super(message);
+    this.name = 'RoomSecurityConfigurationError';
+  }
+}
+
+export class RoomCapacityFullError extends Error {
+  constructor(message = 'This match room has reached its maximum player capacity.') {
+    super(message);
+    this.name = 'RoomCapacityFullError';
+  }
+}
+
+export class InvalidAccessCodeError extends Error {
+  constructor(message = 'Invalid room access PIN.') {
+    super(message);
+    this.name = 'InvalidAccessCodeError';
+  }
+}
+
+export class InviteNotFoundError extends Error {
+  constructor(message = 'Invitation link is invalid or does not exist.') {
+    super(message);
+    this.name = 'InviteNotFoundError';
+  }
+}
+
+export class InviteRevokedError extends Error {
+  constructor(message = 'This invitation link has been revoked by the host.') {
+    super(message);
+    this.name = 'InviteRevokedError';
+  }
+}
+
+export class InviteExpiredError extends Error {
+  constructor(message = 'This invitation link has expired.') {
+    super(message);
+    this.name = 'InviteExpiredError';
+  }
+}
+
+export class InviteUsageLimitExceededError extends Error {
+  constructor(message = 'This invitation link has reached its maximum usage limit.') {
+    super(message);
+    this.name = 'InviteUsageLimitExceededError';
+  }
+}
+
+export class MalformedCursorError extends Error {
+  constructor(message = 'Malformed, invalid, or tampered pagination cursor.') {
+    super(message);
+    this.name = 'MalformedCursorError';
   }
 }
 
@@ -961,22 +1021,141 @@ export class FirestoreRepository {
   }
 
   // ==========================================
-  // PHASE 4.1: LIVE ROOMS & REAL-TIME CHAT
+  // PHASE 4.1: LIVE ROOMS & REAL-TIME CHAT (PUBLIC & PRIVATE)
   // ==========================================
+
+  // Cryptographic Helper: Scrypt PIN Hashing with fail-closed pepper
+  public static async hashPin(pin: string): Promise<string> {
+    const pepper = process.env.ROOM_ACCESS_PEPPER;
+    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 16) {
+      throw new RoomSecurityConfigurationError(
+        'Server secret configuration is missing or invalid. ROOM_ACCESS_PEPPER must be at least 16 characters.'
+      );
+    }
+    const cleanPin = (pin || '').trim();
+    if (!/^\d{4,8}$/.test(cleanPin)) {
+      throw new RoomValidationError('Room access PIN must be between 4 and 8 digits.');
+    }
+    const salt = crypto.randomBytes(16);
+    const combinedInput = `${cleanPin}:${pepper.trim()}`;
+    const N = 16384, r = 8, p = 1, keyLen = 64;
+
+    const derivedKey = await new Promise<Buffer>((resolve, reject) => {
+      crypto.scrypt(combinedInput, salt, keyLen, { N, r, p }, (err, key) => {
+        if (err) reject(err);
+        else resolve(key);
+      });
+    });
+
+    return `scrypt$v1$${N}$${r}$${p}$${salt.toString('hex')}$${derivedKey.toString('hex')}`;
+  }
+
+  // Cryptographic Helper: Scrypt PIN Verification
+  public static async verifyPin(inputPin: string, storedHash: string): Promise<boolean> {
+    const pepper = process.env.ROOM_ACCESS_PEPPER;
+    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 16) {
+      throw new RoomSecurityConfigurationError(
+        'Server secret configuration is missing. PIN verification unavailable.'
+      );
+    }
+    const cleanPin = (inputPin || '').trim();
+    if (!cleanPin || !storedHash) return false;
+
+    const parts = storedHash.split('$');
+    if (parts.length !== 7 || parts[0] !== 'scrypt') {
+      return false;
+    }
+    const [, version, NStr, rStr, pStr, saltHex, expectedKeyHex] = parts;
+    const N = parseInt(NStr, 10);
+    const r = parseInt(rStr, 10);
+    const p = parseInt(pStr, 10);
+    const salt = Buffer.from(saltHex, 'hex');
+
+    const combinedInput = `${cleanPin}:${pepper.trim()}`;
+    const derivedKey = await new Promise<Buffer>((resolve, reject) => {
+      crypto.scrypt(combinedInput, salt, 64, { N, r, p }, (err, key) => {
+        if (err) reject(err);
+        else resolve(key);
+      });
+    });
+
+    return crypto.timingSafeEqual(derivedKey, Buffer.from(expectedKeyHex, 'hex'));
+  }
+
+  // Cursor Helpers
+  public static encodeCursor(createdAt: string, documentId: string): string {
+    const payload: RoomPaginationCursor = { createdAt, documentId };
+    return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  }
+
+  public static decodeCursor(rawCursor?: string): RoomPaginationCursor | null {
+    if (!rawCursor || typeof rawCursor !== 'string') return null;
+    try {
+      const jsonStr = Buffer.from(rawCursor, 'base64url').toString('utf8');
+      const parsed = JSON.parse(jsonStr);
+      if (
+        typeof parsed.createdAt === 'string' &&
+        !isNaN(Date.parse(parsed.createdAt)) &&
+        typeof parsed.documentId === 'string' &&
+        parsed.documentId.length > 0 &&
+        parsed.documentId.length <= 128
+      ) {
+        return {
+          createdAt: parsed.createdAt,
+          documentId: parsed.documentId,
+        };
+      }
+      throw new Error('Invalid cursor fields');
+    } catch (err) {
+      throw new MalformedCursorError('Malformed, invalid, or tampered pagination cursor.');
+    }
+  }
 
   public async createRoom(
     hostId: string,
     hostName: string,
     gameId: string,
     gameTitle: string,
-    rawTitle: string
-  ): Promise<MatchRoom> {
+    rawTitle: string,
+    visibility: RoomVisibility = 'public',
+    rawPin?: string,
+    rawCapacity?: number
+  ): Promise<{ room: MatchRoom; pin?: string }> {
     if (!hostId) throw new RoomValidationError('Host ID is required to create a room.');
     if (!gameId) throw new RoomValidationError('Game ID is required to create a room.');
 
     const title = (rawTitle || '').trim();
     if (title.length < 3 || title.length > 60) {
       throw new RoomValidationError('Room title must be between 3 and 60 characters.');
+    }
+
+    if (visibility !== 'public' && visibility !== 'private') {
+      throw new RoomValidationError("Visibility must be either 'public' or 'private'.");
+    }
+
+    let maxParticipants = 4;
+    if (rawCapacity !== undefined && rawCapacity !== null) {
+      if (typeof rawCapacity !== 'number' || !Number.isInteger(rawCapacity) || rawCapacity < 2 || rawCapacity > 16) {
+        throw new RoomValidationError('Room player capacity must be an integer between 2 and 16.');
+      }
+      maxParticipants = rawCapacity;
+    }
+
+    let accessCodeHash: string | null = null;
+    let plaintextPin: string | undefined = undefined;
+
+    if (visibility === 'private') {
+      if (rawPin && rawPin.trim()) {
+        const clean = rawPin.trim();
+        if (!/^\d{4,8}$/.test(clean)) {
+          throw new RoomValidationError('Room access PIN must be between 4 and 8 digits.');
+        }
+        plaintextPin = clean;
+      } else {
+        // Auto-generate secure 6-digit PIN
+        plaintextPin = Math.floor(100000 + Math.random() * 900000).toString();
+      }
+      accessCodeHash = await FirestoreRepository.hashPin(plaintextPin);
     }
 
     const roomId = `rm_${crypto.randomBytes(3).toString('hex').toLowerCase()}`;
@@ -999,6 +1178,9 @@ export class FirestoreRepository {
       gameTitle: gameTitle || gameId,
       title,
       status: 'waiting',
+      visibility,
+      maxParticipants,
+      accessCodeHash,
       participantCount: 1,
       participants: initialParticipants,
       stream: {
@@ -1014,7 +1196,7 @@ export class FirestoreRepository {
     };
 
     await this.db.collection('rooms').doc(roomId).set(newRoom);
-    return newRoom;
+    return { room: newRoom, pin: plaintextPin };
   }
 
   public async getRoom(roomId: string): Promise<MatchRoom | null> {
@@ -1024,33 +1206,146 @@ export class FirestoreRepository {
     return snap.data() as MatchRoom;
   }
 
-  public async listRooms(gameId?: string, status?: RoomStatus): Promise<MatchRoom[]> {
-    let query: FirebaseFirestore.Query = this.db.collection('rooms');
+  // Reset Room PIN (Host Only)
+  public async resetRoomPin(roomId: string, hostId: string, newPin?: string): Promise<{ room: MatchRoom; pin: string }> {
+    if (!roomId) throw new RoomValidationError('Room ID is required.');
+    if (!hostId) throw new RoomValidationError('Host ID is required.');
+
+    const roomRef = this.db.collection('rooms').doc(roomId);
+
+    let generatedPin = (newPin || '').trim();
+    if (generatedPin) {
+      if (!/^\d{4,8}$/.test(generatedPin)) {
+        throw new RoomValidationError('New PIN must be between 4 and 8 digits.');
+      }
+    } else {
+      generatedPin = Math.floor(100000 + Math.random() * 900000).toString();
+    }
+
+    const newHash = await FirestoreRepository.hashPin(generatedPin);
+
+    const updated = await this.db.runTransaction(async (t) => {
+      const snap = await t.get(roomRef);
+      if (!snap.exists) throw new RoomNotFoundError(`Room '${roomId}' not found.`);
+      const room = snap.data() as MatchRoom;
+      if (room.hostId !== hostId) {
+        throw new UnauthorizedHostActionError('Only the room host can reset the room PIN.');
+      }
+      if (room.status === 'ended') {
+        throw new RoomEndedError(`Room '${roomId}' has already ended.`);
+      }
+
+      const nowISO = new Date().toISOString();
+      const updatedRoom: MatchRoom = {
+        ...room,
+        visibility: 'private',
+        accessCodeHash: newHash,
+        updatedAt: nowISO,
+      };
+
+      t.set(roomRef, updatedRoom);
+      return updatedRoom;
+    });
+
+    return { room: updated, pin: generatedPin };
+  }
+
+  // Dual-Stream Deterministic Public & Legacy Room Listing
+  public async listRooms(
+    gameId?: string,
+    status?: RoomStatus,
+    limitCount = 20,
+    rawCursor?: string
+  ): Promise<{ rooms: MatchRoom[]; nextCursor: string | null }> {
+    const limit = Math.min(Math.max(limitCount || 20, 1), 50);
+    const cursor = FirestoreRepository.decodeCursor(rawCursor);
+
+    // Stream A: Explicit Public Rooms
+    let streamAQuery: FirebaseFirestore.Query = this.db.collection('rooms')
+      .where('visibility', '==', 'public');
 
     if (status) {
-      query = query.where('status', '==', status);
+      streamAQuery = streamAQuery.where('status', '==', status);
     } else {
-      query = query.where('status', 'in', ['waiting', 'live']);
+      streamAQuery = streamAQuery.where('status', 'in', ['waiting', 'live']);
     }
 
     if (gameId && gameId !== 'all') {
-      query = query.where('gameId', '==', gameId);
+      streamAQuery = streamAQuery.where('gameId', '==', gameId);
     }
 
-    const snap = await query.get();
-    const rooms: MatchRoom[] = [];
-    snap.forEach((doc) => {
-      rooms.push(doc.data() as MatchRoom);
+    streamAQuery = streamAQuery
+      .orderBy('createdAt', 'desc')
+      .orderBy(FieldPath.documentId(), 'desc');
+
+    if (cursor) {
+      streamAQuery = streamAQuery.startAfter(cursor.createdAt, cursor.documentId);
+    }
+    streamAQuery = streamAQuery.limit(limit);
+
+    // Stream B: Legacy Scan (where visibility is absent)
+    let streamBQuery: FirebaseFirestore.Query = this.db.collection('rooms');
+    if (status) {
+      streamBQuery = streamBQuery.where('status', '==', status);
+    } else {
+      streamBQuery = streamBQuery.where('status', 'in', ['waiting', 'live']);
+    }
+
+    if (gameId && gameId !== 'all') {
+      streamBQuery = streamBQuery.where('gameId', '==', gameId);
+    }
+
+    streamBQuery = streamBQuery
+      .orderBy('createdAt', 'desc')
+      .orderBy(FieldPath.documentId(), 'desc');
+
+    if (cursor) {
+      streamBQuery = streamBQuery.startAfter(cursor.createdAt, cursor.documentId);
+    }
+    // Read a buffer to allow in-memory filtering of private rooms without starving
+    streamBQuery = streamBQuery.limit(limit * 2);
+
+    const [snapA, snapB] = await Promise.all([streamAQuery.get(), streamBQuery.get()]);
+
+    const roomMap = new Map<string, MatchRoom>();
+
+    snapA.forEach((doc) => {
+      const r = doc.data() as MatchRoom;
+      roomMap.set(r.id, r);
     });
 
-    rooms.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return rooms;
+    snapB.forEach((doc) => {
+      const r = doc.data() as MatchRoom;
+      // Accept only legacy rooms where visibility is absent (undefined)
+      if (r.visibility === undefined || r.visibility === null) {
+        roomMap.set(r.id, r);
+      }
+    });
+
+    // Deterministic sort: createdAt DESC, documentId DESC
+    const sorted = Array.from(roomMap.values()).sort((a, b) => {
+      const timeA = new Date(a.createdAt).getTime();
+      const timeB = new Date(b.createdAt).getTime();
+      if (timeA !== timeB) {
+        return timeB - timeA;
+      }
+      return b.id.localeCompare(a.id);
+    });
+
+    const pageItems = sorted.slice(0, limit);
+    const nextCursor = pageItems.length === limit
+      ? FirestoreRepository.encodeCursor(pageItems[pageItems.length - 1].createdAt, pageItems[pageItems.length - 1].id)
+      : null;
+
+    return { rooms: pageItems, nextCursor };
   }
 
+  // Universal Join Room with Capacity Enforcement
   public async joinRoom(
     roomId: string,
     userId: string,
-    userName: string
+    userName: string,
+    providedPin?: string
   ): Promise<MatchRoom> {
     if (!roomId) throw new RoomValidationError('Room ID is required.');
     if (!userId) throw new RoomValidationError('User ID is required.');
@@ -1066,6 +1361,36 @@ export class FirestoreRepository {
       const room = snap.data() as MatchRoom;
       if (room.status === 'ended') {
         throw new RoomEndedError(`Room '${roomId}' has already ended.`);
+      }
+
+      // Idempotency: Already in room?
+      if (room.participants && room.participants[userId]) {
+        return room;
+      }
+
+      // Check Private Room PIN if room is private
+      if (room.visibility === 'private') {
+        if (!providedPin) {
+          throw new InvalidAccessCodeError('This room is private. A valid PIN is required to join.');
+        }
+        if (!room.accessCodeHash) {
+          throw new RoomSecurityConfigurationError('Room PIN security verification is missing on this room.');
+        }
+        const isValidPin = await FirestoreRepository.verifyPin(providedPin, room.accessCodeHash);
+        if (!isValidPin) {
+          throw new InvalidAccessCodeError('Incorrect room access PIN.');
+        }
+      }
+
+      // Universal Capacity Check
+      const currentParticipants = Object.keys(room.participants || {});
+      // Legacy rooms preserve their existing count without imposing an unexpected 4-player cap
+      if (room.maxParticipants !== undefined && room.maxParticipants !== null) {
+        if (currentParticipants.length >= room.maxParticipants) {
+          throw new RoomCapacityFullError(
+            `This match room has reached its maximum player capacity of ${room.maxParticipants}.`
+          );
+        }
       }
 
       const nowISO = new Date().toISOString();
@@ -1087,6 +1412,216 @@ export class FirestoreRepository {
 
       t.set(roomRef, updatedRoom);
       return updatedRoom;
+    });
+  }
+
+  // ==========================================
+  // INVITATIONS MANAGEMENT (SUBCOLLECTION)
+  // ==========================================
+
+  // Create Room Invitation (Host Only)
+  public async createInvitation(
+    roomId: string,
+    hostId: string,
+    label?: string,
+    maxUses?: number | null,
+    expiresInHours?: number | null
+  ): Promise<{ invitation: RoomInvitation; rawToken: string }> {
+    if (!roomId) throw new RoomValidationError('Room ID is required.');
+    if (!hostId) throw new RoomValidationError('Host ID is required.');
+
+    const roomSnap = await this.db.collection('rooms').doc(roomId).get();
+    if (!roomSnap.exists) throw new RoomNotFoundError(`Room '${roomId}' not found.`);
+    const room = roomSnap.data() as MatchRoom;
+    if (room.hostId !== hostId) {
+      throw new UnauthorizedHostActionError('Only the room host can create invitations.');
+    }
+    if (room.status === 'ended') {
+      throw new RoomEndedError('Cannot create invitations for an ended room.');
+    }
+
+    const rawToken = crypto.randomBytes(24).toString('base64url'); // 32 chars, ~192 bits
+    const pepper = process.env.ROOM_ACCESS_PEPPER || 'invitation_default_fallback_salt';
+    const tokenHash = crypto.createHmac('sha256', pepper).update(rawToken).digest('hex');
+
+    const invId = `inv_${crypto.randomBytes(4).toString('hex')}`;
+    const now = Date.now();
+    const nowISO = new Date(now).toISOString();
+
+    let expiresAt: string | null = null;
+    if (expiresInHours && expiresInHours > 0) {
+      expiresAt = new Date(now + expiresInHours * 3600 * 1000).toISOString();
+    }
+
+    let parsedMaxUses: number | null = null;
+    if (maxUses !== undefined && maxUses !== null && Number.isInteger(maxUses) && maxUses > 0) {
+      parsedMaxUses = maxUses;
+    }
+
+    const invitation: RoomInvitation = {
+      id: invId,
+      roomId,
+      createdBy: hostId,
+      tokenHash,
+      label: (label || 'Match Invitation').trim().slice(0, 50),
+      maxUses: parsedMaxUses,
+      usedCount: 0,
+      expiresAt,
+      isRevoked: false,
+      createdAt: nowISO,
+    };
+
+    await this.db
+      .collection('rooms')
+      .doc(roomId)
+      .collection('invitations')
+      .doc(invId)
+      .set(invitation);
+
+    return { invitation, rawToken };
+  }
+
+  // List Invitations (Host Only)
+  public async listInvitations(roomId: string, hostId: string): Promise<RoomInvitation[]> {
+    if (!roomId) throw new RoomValidationError('Room ID is required.');
+    const roomSnap = await this.db.collection('rooms').doc(roomId).get();
+    if (!roomSnap.exists) throw new RoomNotFoundError(`Room '${roomId}' not found.`);
+    const room = roomSnap.data() as MatchRoom;
+    if (room.hostId !== hostId) {
+      throw new UnauthorizedHostActionError('Only the room host can view room invitations.');
+    }
+
+    const snap = await this.db
+      .collection('rooms')
+      .doc(roomId)
+      .collection('invitations')
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const invites: RoomInvitation[] = [];
+    snap.forEach((doc) => invites.push(doc.data() as RoomInvitation));
+    return invites;
+  }
+
+  // Revoke Invitation (Host Only)
+  public async revokeInvitation(roomId: string, invitationId: string, hostId: string): Promise<RoomInvitation> {
+    const roomSnap = await this.db.collection('rooms').doc(roomId).get();
+    if (!roomSnap.exists) throw new RoomNotFoundError(`Room '${roomId}' not found.`);
+    const room = roomSnap.data() as MatchRoom;
+    if (room.hostId !== hostId) {
+      throw new UnauthorizedHostActionError('Only the room host can revoke invitations.');
+    }
+
+    const inviteRef = this.db.collection('rooms').doc(roomId).collection('invitations').doc(invitationId);
+    const snap = await inviteRef.get();
+    if (!snap.exists) throw new InviteNotFoundError('Invitation not found.');
+
+    const invite = snap.data() as RoomInvitation;
+    const nowISO = new Date().toISOString();
+    const updated: RoomInvitation = {
+      ...invite,
+      isRevoked: true,
+      revokedAt: nowISO,
+    };
+
+    await inviteRef.set(updated, { merge: true });
+    return updated;
+  }
+
+  // Redeem Invitation Atomically in a Firestore Transaction
+  public async redeemInvitation(
+    roomId: string,
+    rawToken: string,
+    userId: string,
+    userName: string
+  ): Promise<{ room: MatchRoom; alreadyMember: boolean }> {
+    if (!roomId) throw new RoomValidationError('Room ID is required.');
+    if (!rawToken) throw new RoomValidationError('Invitation token is required.');
+    if (!userId) throw new RoomValidationError('User ID is required.');
+
+    const pepper = process.env.ROOM_ACCESS_PEPPER || 'invitation_default_fallback_salt';
+    const tokenHash = crypto.createHmac('sha256', pepper).update(rawToken).digest('hex');
+
+    // Find invitation by tokenHash
+    const inviteQuerySnap = await this.db
+      .collection('rooms')
+      .doc(roomId)
+      .collection('invitations')
+      .where('tokenHash', '==', tokenHash)
+      .limit(1)
+      .get();
+
+    if (inviteQuerySnap.empty) {
+      throw new InviteNotFoundError('Invalid invitation link or token.');
+    }
+
+    const inviteDoc = inviteQuerySnap.docs[0];
+    const inviteRef = inviteDoc.ref;
+    const roomRef = this.db.collection('rooms').doc(roomId);
+
+    return await this.db.runTransaction(async (t) => {
+      const roomSnap = await t.get(roomRef);
+      if (!roomSnap.exists) throw new RoomNotFoundError(`Room '${roomId}' not found.`);
+      const room = roomSnap.data() as MatchRoom;
+      if (room.status === 'ended') {
+        throw new RoomEndedError(`Room '${roomId}' has already ended.`);
+      }
+
+      // Idempotency check: Already inside?
+      if (room.participants && room.participants[userId]) {
+        return { room, alreadyMember: true };
+      }
+
+      // Universal Capacity Check
+      const currentParticipants = Object.keys(room.participants || {});
+      if (room.maxParticipants !== undefined && room.maxParticipants !== null) {
+        if (currentParticipants.length >= room.maxParticipants) {
+          throw new RoomCapacityFullError(
+            `This match room has reached its maximum player capacity of ${room.maxParticipants}.`
+          );
+        }
+      }
+
+      // Read invite document inside transaction
+      const currentInviteSnap = await t.get(inviteRef);
+      if (!currentInviteSnap.exists) throw new InviteNotFoundError('Invitation does not exist.');
+      const currentInvite = currentInviteSnap.data() as RoomInvitation;
+
+      // Validation
+      if (currentInvite.isRevoked) {
+        throw new InviteRevokedError('This invitation has been revoked by the host.');
+      }
+      if (currentInvite.expiresAt && Date.now() > new Date(currentInvite.expiresAt).getTime()) {
+        throw new InviteExpiredError('This invitation link has expired.');
+      }
+      if (currentInvite.maxUses !== null && currentInvite.usedCount >= currentInvite.maxUses) {
+        throw new InviteUsageLimitExceededError('This invitation has reached its maximum usage limit.');
+      }
+
+      const nowISO = new Date().toISOString();
+      const participants = { ...(room.participants || {}) };
+      participants[userId] = {
+        userId,
+        displayName: userName || 'Player',
+        joinedAt: nowISO,
+        isHost: (room.hostId === userId),
+      };
+
+      const updatedRoom: MatchRoom = {
+        ...room,
+        participants,
+        participantCount: Object.keys(participants).length,
+        updatedAt: nowISO,
+      };
+
+      t.update(inviteRef, {
+        usedCount: currentInvite.usedCount + 1,
+        lastUsedAt: nowISO,
+      });
+
+      t.set(roomRef, updatedRoom);
+
+      return { room: updatedRoom, alreadyMember: false };
     });
   }
 
@@ -1380,8 +1915,24 @@ export class FirestoreRepository {
     return chatMsg;
   }
 
-  public async getMessages(roomId: string, limitCount = 50): Promise<ChatMessage[]> {
-    if (!roomId) return [];
+  public async getMessages(roomId: string, userId: string, limitCount = 50): Promise<ChatMessage[]> {
+    if (!roomId) throw new RoomValidationError('Room ID is required.');
+    if (!userId) throw new RoomValidationError('User ID is required.');
+
+    const roomSnap = await this.db.collection('rooms').doc(roomId).get();
+    if (!roomSnap.exists) {
+      throw new RoomNotFoundError(`Room '${roomId}' not found.`);
+    }
+
+    const room = roomSnap.data() as MatchRoom;
+    if (room.status === 'ended') {
+      throw new RoomEndedError(`Room '${roomId}' has already ended.`);
+    }
+
+    if (!room.participants || !room.participants[userId]) {
+      throw new ChatUnauthorizedError('You must be an active room participant to read messages.');
+    }
+
     const snap = await this.db
       .collection('rooms')
       .doc(roomId)

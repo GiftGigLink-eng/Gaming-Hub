@@ -85,15 +85,35 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
-    // Live Match Rooms: Read allowed for signed in users; mutations handled server-authoritatively.
+    // Live Match Rooms: Public rooms or member access for private rooms; mutations handled server-authoritatively.
     match /rooms/{roomId} {
-      allow get, list: if isSignedIn();
+      // Individual room inspection: allowed for public/legacy rooms, or if user is host or participant
+      allow get: if isSignedIn() && (
+        resource.data.visibility == 'public' ||
+        !('visibility' in resource.data) ||
+        request.auth.uid == resource.data.hostId ||
+        request.auth.uid in resource.data.participants
+      );
+
+      // Direct client collection query: allowed strictly for public/legacy rooms
+      allow list: if isSignedIn() && (
+        resource.data.visibility == 'public' ||
+        !('visibility' in resource.data)
+      );
+
       allow create, update, delete: if false;
 
-      // Real-time Chat Messages inside rooms: Read allowed for signed in users; writes via server.
+      // Real-time Chat Messages inside rooms: Read allowed strictly for active room participants
       match /messages/{messageId} {
-        allow get, list: if isSignedIn();
+        allow get, list: if isSignedIn() && (
+          request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.participants
+        );
         allow create, update, delete: if false;
+      }
+
+      // Invitations subcollection: Client access strictly FORBIDDEN (managed only via server admin SDK)
+      match /invitations/{invitationId} {
+        allow read, write: if false;
       }
     }
   }
