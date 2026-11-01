@@ -34,6 +34,10 @@ import { PrivateRoomPreview } from './src/types.js';
 
 dotenv.config();
 
+if (!process.env.ROOM_ACCESS_PEPPER && process.env.NODE_ENV !== 'production') {
+  process.env.ROOM_ACCESS_PEPPER = 'dev_gaming_hub_room_access_pepper_2026_secure';
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

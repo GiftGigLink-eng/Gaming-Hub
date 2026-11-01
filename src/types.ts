@@ -175,6 +175,7 @@ export interface RoomInvitation {
   usedCount: number;               // Current redemptions
   expiresAt: string | null;        // ISO 8601 timestamp or null
   isRevoked: boolean;              // Immediate manual revocation flag
+  status?: 'active' | 'revoked' | 'expired' | 'exhausted';
   createdAt: string;
   revokedAt?: string | null;
 }

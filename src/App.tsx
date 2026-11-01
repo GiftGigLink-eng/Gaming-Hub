@@ -31,22 +31,64 @@ export default function App() {
   const [matchesSubTab, setMatchesSubTab] = useState<'passes' | 'rooms'>('passes');
   const [selectedRoom, setSelectedRoom] = useState<MatchRoom | null>(null);
 
-  // Parse room invite URL parameter (?room=rm_...)
+  // Parse room invite URL parameter (?room=rm_...&token=...)
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
       const roomCode = params.get('room');
+      const token = params.get('token') || params.get('inviteToken');
+
       if (roomCode) {
-        fetch(`/api/rooms/${roomCode}`)
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.success && data.room) {
-              setSelectedRoom(data.room);
-              setActiveTab('sessions');
-              setMatchesSubTab('rooms');
-            }
+        if (token) {
+          authFetch(`/api/rooms/${roomCode}/invitations/redeem`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token }),
           })
-          .catch(() => {});
+            .then((res) => res.json())
+            .then((data) => {
+              if (data.success && data.room) {
+                setSelectedRoom(data.room);
+                setActiveTab('sessions');
+                setMatchesSubTab('rooms');
+                showToast('Successfully redeemed room invitation!', 'success');
+              } else {
+                fetch(`/api/rooms/${roomCode}`)
+                  .then((res) => res.json())
+                  .then((d) => {
+                    if (d.success && d.room) {
+                      setSelectedRoom(d.room);
+                      setActiveTab('sessions');
+                      setMatchesSubTab('rooms');
+                    }
+                  })
+                  .catch(() => {});
+              }
+            })
+            .catch(() => {
+              fetch(`/api/rooms/${roomCode}`)
+                .then((res) => res.json())
+                .then((d) => {
+                  if (d.success && d.room) {
+                    setSelectedRoom(d.room);
+                    setActiveTab('sessions');
+                    setMatchesSubTab('rooms');
+                  }
+                })
+                .catch(() => {});
+            });
+        } else {
+          fetch(`/api/rooms/${roomCode}`)
+            .then((res) => res.json())
+            .then((data) => {
+              if (data.success && data.room) {
+                setSelectedRoom(data.room);
+                setActiveTab('sessions');
+                setMatchesSubTab('rooms');
+              }
+            })
+            .catch(() => {});
+        }
       }
     } catch (e) {
       // ignore

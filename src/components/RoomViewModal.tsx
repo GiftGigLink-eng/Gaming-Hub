@@ -400,7 +400,7 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Failed to generate invitation');
       }
-      setCreatedInvitePlainToken(data.invitation.token);
+      setCreatedInvitePlainToken(data.rawToken || data.invitation?.token);
       setNewInviteLabel('');
       setNewInviteMaxUses('');
       setNewInviteExpiresHours('');
@@ -623,7 +623,6 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                 <span>Invites & Privacy</span>
               </button>
             )}
-          </div>
           </div>
         </div>
 
@@ -1094,14 +1093,14 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                     <input
                       type="text"
                       readOnly
-                      value={`${window.location.origin}?inviteToken=${createdInvitePlainToken}`}
+                      value={`${window.location.origin}?room=${currentRoom.id}&token=${createdInvitePlainToken}`}
                       className="flex-1 px-3 py-1.5 rounded-xl bg-black/60 border border-emerald-500/30 text-xs text-emerald-200 font-mono select-all"
                     />
                     <button
                       type="button"
                       onClick={() => {
                         navigator.clipboard.writeText(
-                          `${window.location.origin}?inviteToken=${createdInvitePlainToken}`
+                          `${window.location.origin}?room=${currentRoom.id}&token=${createdInvitePlainToken}`
                         );
                         setCopiedInviteUrl(true);
                         setTimeout(() => setCopiedInviteUrl(false), 2000);
@@ -1193,7 +1192,7 @@ export const RoomViewModal: React.FC<RoomViewModalProps> = ({
                 <div className="space-y-2">
                   {invitations.map((inv) => {
                     const isRevoked = inv.status === 'revoked';
-                    const isExpired = inv.expiresAt ? Date.now() > inv.expiresAt : false;
+                    const isExpired = inv.expiresAt ? Date.now() > new Date(inv.expiresAt).getTime() : false;
                     const isExhausted = inv.maxUses ? inv.usedCount >= inv.maxUses : false;
                     const isActive = !isRevoked && !isExpired && !isExhausted;
 

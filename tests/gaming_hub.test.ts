@@ -1044,7 +1044,7 @@ export async function runAllTests() {
     assert.strictEqual(msg.roomId, room.id);
 
     // Message retrieval
-    const msgs = await firestoreRepo.getMessages(room.id);
+    const msgs = await firestoreRepo.getMessages(room.id, hostId);
     assert.strictEqual(msgs.length, 1);
     assert.strictEqual(msgs[0].text, 'Drop at Pochinki!');
 

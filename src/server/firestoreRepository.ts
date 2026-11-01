@@ -1027,9 +1027,9 @@ export class FirestoreRepository {
   // Cryptographic Helper: Scrypt PIN Hashing with fail-closed pepper
   public static async hashPin(pin: string): Promise<string> {
     const pepper = process.env.ROOM_ACCESS_PEPPER;
-    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 16) {
+    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 32) {
       throw new RoomSecurityConfigurationError(
-        'Server secret configuration is missing or invalid. ROOM_ACCESS_PEPPER must be at least 16 characters.'
+        'Server secret configuration is missing or invalid. ROOM_ACCESS_PEPPER must be at least 32 characters.'
       );
     }
     const cleanPin = (pin || '').trim();
@@ -1053,9 +1053,9 @@ export class FirestoreRepository {
   // Cryptographic Helper: Scrypt PIN Verification
   public static async verifyPin(inputPin: string, storedHash: string): Promise<boolean> {
     const pepper = process.env.ROOM_ACCESS_PEPPER;
-    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 16) {
+    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 32) {
       throw new RoomSecurityConfigurationError(
-        'Server secret configuration is missing. PIN verification unavailable.'
+        'Server secret configuration is missing or invalid. ROOM_ACCESS_PEPPER must be at least 32 characters.'
       );
     }
     const cleanPin = (inputPin || '').trim();
@@ -1083,8 +1083,11 @@ export class FirestoreRepository {
   }
 
   // Cursor Helpers
-  public static encodeCursor(createdAt: string, documentId: string): string {
-    const payload: RoomPaginationCursor = { createdAt, documentId };
+  public static encodeCursor(createdAtOrObj: string | RoomPaginationCursor, docId?: string): string {
+    const payload: RoomPaginationCursor =
+      typeof createdAtOrObj === 'object'
+        ? createdAtOrObj
+        : { createdAt: createdAtOrObj, documentId: docId! };
     return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   }
 
@@ -1093,15 +1096,22 @@ export class FirestoreRepository {
     try {
       const jsonStr = Buffer.from(rawCursor, 'base64url').toString('utf8');
       const parsed = JSON.parse(jsonStr);
+      const createdAtStr =
+        typeof parsed.createdAt === 'string'
+          ? parsed.createdAt
+          : typeof parsed.createdAt === 'number' && parsed.createdAt > 0
+          ? new Date(parsed.createdAt).toISOString()
+          : null;
+
       if (
-        typeof parsed.createdAt === 'string' &&
-        !isNaN(Date.parse(parsed.createdAt)) &&
+        createdAtStr &&
+        !isNaN(Date.parse(createdAtStr)) &&
         typeof parsed.documentId === 'string' &&
         parsed.documentId.length > 0 &&
         parsed.documentId.length <= 128
       ) {
         return {
-          createdAt: parsed.createdAt,
+          createdAt: createdAtStr,
           documentId: parsed.documentId,
         };
       }
@@ -1120,7 +1130,7 @@ export class FirestoreRepository {
     visibility: RoomVisibility = 'public',
     rawPin?: string,
     rawCapacity?: number
-  ): Promise<{ room: MatchRoom; pin?: string }> {
+  ): Promise<MatchRoom & { room: MatchRoom; pin?: string }> {
     if (!hostId) throw new RoomValidationError('Host ID is required to create a room.');
     if (!gameId) throw new RoomValidationError('Game ID is required to create a room.');
 
@@ -1196,7 +1206,7 @@ export class FirestoreRepository {
     };
 
     await this.db.collection('rooms').doc(roomId).set(newRoom);
-    return { room: newRoom, pin: plaintextPin };
+    return Object.assign(newRoom, { room: newRoom, pin: plaintextPin });
   }
 
   public async getRoom(roomId: string): Promise<MatchRoom | null> {
@@ -1207,7 +1217,7 @@ export class FirestoreRepository {
   }
 
   // Reset Room PIN (Host Only)
-  public async resetRoomPin(roomId: string, hostId: string, newPin?: string): Promise<{ room: MatchRoom; pin: string }> {
+  public async resetRoomPin(roomId: string, hostId: string, newPin?: string): Promise<MatchRoom & { room: MatchRoom; pin: string }> {
     if (!roomId) throw new RoomValidationError('Room ID is required.');
     if (!hostId) throw new RoomValidationError('Host ID is required.');
 
@@ -1247,7 +1257,7 @@ export class FirestoreRepository {
       return updatedRoom;
     });
 
-    return { room: updated, pin: generatedPin };
+    return Object.assign(updated, { room: updated, pin: generatedPin });
   }
 
   // Dual-Stream Deterministic Public & Legacy Room Listing
@@ -1441,8 +1451,13 @@ export class FirestoreRepository {
     }
 
     const rawToken = crypto.randomBytes(24).toString('base64url'); // 32 chars, ~192 bits
-    const pepper = process.env.ROOM_ACCESS_PEPPER || 'invitation_default_fallback_salt';
-    const tokenHash = crypto.createHmac('sha256', pepper).update(rawToken).digest('hex');
+    const pepper = process.env.ROOM_ACCESS_PEPPER;
+    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 32) {
+      throw new RoomSecurityConfigurationError(
+        'Server secret configuration is missing or invalid. ROOM_ACCESS_PEPPER must be at least 32 characters.'
+      );
+    }
+    const tokenHash = crypto.createHmac('sha256', pepper.trim()).update(rawToken).digest('hex');
 
     const invId = `inv_${crypto.randomBytes(4).toString('hex')}`;
     const now = Date.now();
@@ -1468,6 +1483,7 @@ export class FirestoreRepository {
       usedCount: 0,
       expiresAt,
       isRevoked: false,
+      status: 'active',
       createdAt: nowISO,
     };
 
@@ -1499,7 +1515,16 @@ export class FirestoreRepository {
       .get();
 
     const invites: RoomInvitation[] = [];
-    snap.forEach((doc) => invites.push(doc.data() as RoomInvitation));
+    const nowMs = Date.now();
+    snap.forEach((doc) => {
+      const data = doc.data() as RoomInvitation;
+      const isRevoked = data.isRevoked;
+      const isExpired = data.expiresAt ? nowMs > new Date(data.expiresAt).getTime() : false;
+      const isExhausted = data.maxUses ? data.usedCount >= data.maxUses : false;
+      const status: 'active' | 'revoked' | 'expired' | 'exhausted' =
+        isRevoked ? 'revoked' : isExpired ? 'expired' : isExhausted ? 'exhausted' : 'active';
+      invites.push({ ...data, status });
+    });
     return invites;
   }
 
@@ -1521,6 +1546,7 @@ export class FirestoreRepository {
     const updated: RoomInvitation = {
       ...invite,
       isRevoked: true,
+      status: 'revoked',
       revokedAt: nowISO,
     };
 
@@ -1539,8 +1565,13 @@ export class FirestoreRepository {
     if (!rawToken) throw new RoomValidationError('Invitation token is required.');
     if (!userId) throw new RoomValidationError('User ID is required.');
 
-    const pepper = process.env.ROOM_ACCESS_PEPPER || 'invitation_default_fallback_salt';
-    const tokenHash = crypto.createHmac('sha256', pepper).update(rawToken).digest('hex');
+    const pepper = process.env.ROOM_ACCESS_PEPPER;
+    if (!pepper || typeof pepper !== 'string' || pepper.trim().length < 32) {
+      throw new RoomSecurityConfigurationError(
+        'Server secret configuration is missing or invalid. ROOM_ACCESS_PEPPER must be at least 32 characters.'
+      );
+    }
+    const tokenHash = crypto.createHmac('sha256', pepper.trim()).update(rawToken).digest('hex');
 
     // Find invitation by tokenHash
     const inviteQuerySnap = await this.db
