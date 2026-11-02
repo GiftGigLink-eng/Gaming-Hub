@@ -1206,7 +1206,16 @@ export class FirestoreRepository {
     };
 
     await this.db.collection('rooms').doc(roomId).set(newRoom);
-    return Object.assign(newRoom, { room: newRoom, pin: plaintextPin });
+    const result: MatchRoom & { room?: MatchRoom; pin?: string } = {
+      ...newRoom,
+      pin: plaintextPin,
+    };
+    Object.defineProperty(result, 'room', {
+      get() { return newRoom; },
+      enumerable: false,
+      configurable: true,
+    });
+    return result as MatchRoom & { room: MatchRoom; pin?: string };
   }
 
   public async getRoom(roomId: string): Promise<MatchRoom | null> {
@@ -1257,7 +1266,16 @@ export class FirestoreRepository {
       return updatedRoom;
     });
 
-    return Object.assign(updated, { room: updated, pin: generatedPin });
+    const result: MatchRoom & { room?: MatchRoom; pin: string } = {
+      ...updated,
+      pin: generatedPin,
+    };
+    Object.defineProperty(result, 'room', {
+      get() { return updated; },
+      enumerable: false,
+      configurable: true,
+    });
+    return result as MatchRoom & { room: MatchRoom; pin: string };
   }
 
   // Dual-Stream Deterministic Public & Legacy Room Listing

@@ -1,28 +1,100 @@
-import { initializeApp, getApps, App } from 'firebase-admin/app';
+import { initializeApp, getApps, App, cert } from 'firebase-admin/app';
 import { getAuth, DecodedIdToken } from 'firebase-admin/auth';
 import { Request, Response, NextFunction } from 'express';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 // Verify the intended Firebase project ID from verified configuration
-const EXPECTED_PROJECT_ID = 'gen-lang-client-0739137370';
+export const EXPECTED_PROJECT_ID = 'gen-lang-client-0739137370';
 
-if (firebaseConfig.projectId !== EXPECTED_PROJECT_ID) {
-  console.error(`[FirebaseAdmin] CRITICAL MISMATCH: Expected project ${EXPECTED_PROJECT_ID}, got ${firebaseConfig.projectId}`);
+export interface FirebaseAdminInitOptions {
+  serviceAccountKeyJson?: string;
+  projectId?: string;
+  googleAppCreds?: string;
+  isProduction?: boolean;
+}
+
+/**
+ * Initializes or retrieves the Firebase Admin App instance.
+ * Fails fast with clear, safe error messages in production if credentials are missing or invalid.
+ */
+export function createFirebaseAdminApp(options?: FirebaseAdminInitOptions): App {
+  const existingApps = getApps();
+  if (existingApps.length > 0) {
+    return existingApps[0]!;
+  }
+
+  const isProd = options?.isProduction !== undefined
+    ? options.isProduction
+    : process.env.NODE_ENV === 'production';
+
+  const configProjectId = options?.projectId ?? firebaseConfig.projectId;
+  const targetProjectId = configProjectId || EXPECTED_PROJECT_ID;
+
+  if (configProjectId !== EXPECTED_PROJECT_ID) {
+    const mismatchMsg = `Firebase project ID mismatch. Expected ${EXPECTED_PROJECT_ID}, got ${configProjectId}.`;
+    console.error(`[FirebaseAdmin] CRITICAL MISMATCH: ${mismatchMsg}`);
+    if (isProd) {
+      throw new Error(mismatchMsg);
+    }
+  }
+
+  const rawKeyJson = options?.serviceAccountKeyJson !== undefined
+    ? options.serviceAccountKeyJson
+    : process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+
+  const googleAppCreds = options?.googleAppCreds !== undefined
+    ? options.googleAppCreds
+    : process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+  let credential;
+  if (rawKeyJson) {
+    try {
+      const keyData = JSON.parse(rawKeyJson);
+      if (typeof keyData !== 'object' || keyData === null || Array.isArray(keyData)) {
+        throw new Error('Malformed object');
+      }
+      if (keyData.project_id && keyData.project_id !== EXPECTED_PROJECT_ID) {
+        throw new Error(`Firebase service account project ID mismatch. Expected ${EXPECTED_PROJECT_ID}, got ${keyData.project_id}.`);
+      }
+      credential = cert(keyData);
+    } catch (err: any) {
+      if (err.message && err.message.includes('mismatch')) {
+        throw err;
+      }
+      if (isProd) {
+        throw new Error('Invalid FIREBASE_SERVICE_ACCOUNT_KEY format.');
+      }
+      console.warn('[FirebaseAdmin] Could not parse FIREBASE_SERVICE_ACCOUNT_KEY JSON in non-production.');
+    }
+  } else if (isProd && !googleAppCreds) {
+    throw new Error('Missing FIREBASE_SERVICE_ACCOUNT_KEY or GOOGLE_APPLICATION_CREDENTIALS in production.');
+  }
+
+  if (isProd) {
+    return initializeApp({
+      projectId: targetProjectId,
+      ...(credential ? { credential } : {}),
+    });
+  }
+
+  try {
+    const app = initializeApp({
+      projectId: targetProjectId,
+      ...(credential ? { credential } : {}),
+    });
+    console.log(`[FirebaseAdmin] Initialized Firebase Admin for project: ${targetProjectId}`);
+    return app;
+  } catch (err: any) {
+    console.warn('[FirebaseAdmin] Development fallback initialize:', err.message);
+    return initializeApp({ projectId: EXPECTED_PROJECT_ID }, 'fallback');
+  }
 }
 
 // Initialize Firebase Admin SDK safely
 let adminApp: App;
 const existingApps = getApps();
 if (existingApps.length === 0) {
-  try {
-    adminApp = initializeApp({
-      projectId: firebaseConfig.projectId || EXPECTED_PROJECT_ID,
-    });
-    console.log(`[FirebaseAdmin] Initialized Firebase Admin for project: ${firebaseConfig.projectId}`);
-  } catch (err: any) {
-    console.warn('[FirebaseAdmin] Admin initialize notice:', err.message);
-    adminApp = initializeApp({ projectId: EXPECTED_PROJECT_ID }, 'fallback');
-  }
+  adminApp = createFirebaseAdminApp();
 } else {
   adminApp = existingApps[0]!;
 }

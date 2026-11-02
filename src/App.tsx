@@ -112,61 +112,62 @@ export default function App() {
 
   // Fetch user profile and wallet
   const fetchUserData = useCallback(async () => {
+    if (!auth.currentUser) return;
     try {
       const res = await authFetch('/api/auth/user');
-      if (res.status === 401) {
-        // Not authenticated yet
-        return;
-      }
+      if (res.status === 401 || !res.ok) return;
       const data = await res.json();
       if (data.success) {
         setCurrentUser(data.user);
         setWallet(data.wallet);
       }
     } catch (err) {
-      console.error('Error fetching user data:', err);
+      console.warn('[App] Notice: Transient network state fetching user data:', err);
     }
   }, []);
 
   // Fetch active session from server
   const fetchActiveSession = useCallback(async () => {
+    if (!auth.currentUser) return;
     try {
       const res = await authFetch('/api/sessions/active');
-      if (res.status === 401) return;
+      if (res.status === 401 || !res.ok) return;
       const data = await res.json();
       if (data.success) {
         setActiveSession(data.session);
       }
     } catch (err) {
-      console.error('Error fetching active session:', err);
+      console.warn('[App] Notice: Transient network state fetching active session:', err);
     }
   }, []);
 
   // Fetch match opportunities from server
   const fetchOpportunities = useCallback(async () => {
+    if (!auth.currentUser) return;
     try {
       const res = await authFetch('/api/opportunities');
-      if (res.status === 401) return;
+      if (res.status === 401 || !res.ok) return;
       const data = await res.json();
       if (data.success) {
         setOpportunities(data.opportunities || []);
       }
     } catch (err) {
-      console.error('Error fetching match opportunities:', err);
+      console.warn('[App] Notice: Transient network state fetching match opportunities:', err);
     }
   }, []);
 
   // Fetch transactions ledger
   const fetchTransactions = useCallback(async () => {
+    if (!auth.currentUser) return;
     try {
       const res = await authFetch('/api/transactions');
-      if (res.status === 401) return;
+      if (res.status === 401 || !res.ok) return;
       const data = await res.json();
       if (data.success) {
         setTransactions(data.transactions);
       }
     } catch (err) {
-      console.error('Error fetching transactions:', err);
+      console.warn('[App] Notice: Transient network state fetching transactions:', err);
     }
   }, []);
 

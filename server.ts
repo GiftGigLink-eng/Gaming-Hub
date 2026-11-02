@@ -73,6 +73,24 @@ function getHost(): string {
 const PORT = getPort();
 const HOST = getHost();
 
+// CORS Middleware for iframe and preview environments
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
 // Body parsing with raw text capture for Paystack webhook signature verification
 app.use(express.json({
   verify: (req: any, _res, buf) => {
@@ -521,7 +539,12 @@ app.post('/api/rooms', authenticateFirebaseUser, async (req: AuthenticatedReques
       maxParticipants
     );
 
-    res.status(201).json({ success: true, room: result.room, pin: result.pin });
+    const roomData = result.room || result;
+    const sanitizedRoom = { ...roomData };
+    delete (sanitizedRoom as any).accessCodeHash;
+    delete (sanitizedRoom as any).pin;
+
+    res.status(201).json({ success: true, room: sanitizedRoom, pin: result.pin });
   } catch (err: any) {
     if (err instanceof RoomValidationError) {
       return res.status(400).json({ success: false, error: err.message, code: 'VALIDATION_ERROR' });
@@ -612,8 +635,10 @@ app.post('/api/rooms/:roomId/pin/reset', authenticateFirebaseUser, async (req: A
     const { pin } = req.body;
 
     const result = await firestoreRepo.resetRoomPin(roomId, userId, pin);
-    const sanitizedRoom = { ...result.room };
+    const roomData = result.room || result;
+    const sanitizedRoom = { ...roomData };
     delete (sanitizedRoom as any).accessCodeHash;
+    delete (sanitizedRoom as any).pin;
 
     res.json({ success: true, room: sanitizedRoom, pin: result.pin, message: 'Room PIN successfully reset.' });
   } catch (err: any) {
