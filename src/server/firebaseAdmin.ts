@@ -11,6 +11,7 @@ export interface FirebaseAdminInitOptions {
   projectId?: string;
   googleAppCreds?: string;
   isProduction?: boolean;
+  isExternalHosting?: boolean;
 }
 
 /**
@@ -46,6 +47,20 @@ export function createFirebaseAdminApp(options?: FirebaseAdminInitOptions): App 
     ? options.googleAppCreds
     : process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
+  // Detect whether running in a Google Cloud native environment (Cloud Run, GAE, Cloud Functions)
+  const isGcpEnvironment = Boolean(
+    process.env.K_SERVICE ||
+    process.env.GOOGLE_RUNTIME ||
+    process.env.K_REVISION ||
+    process.env.CLOUD_RUN_JOB ||
+    process.env.GAE_ENV
+  );
+
+  // External hosting (e.g. Render, Railway, AWS, or explicit non-GCP production) where GCP metadata credentials are unavailable
+  const isExternalHosting = options?.isExternalHosting !== undefined
+    ? options.isExternalHosting
+    : (options?.isProduction !== undefined ? true : (Boolean(process.env.RENDER) || !isGcpEnvironment));
+
   let credential;
   if (rawKeyJson) {
     try {
@@ -66,7 +81,7 @@ export function createFirebaseAdminApp(options?: FirebaseAdminInitOptions): App 
       }
       console.warn('[FirebaseAdmin] Could not parse FIREBASE_SERVICE_ACCOUNT_KEY JSON in non-production.');
     }
-  } else if (isProd && !googleAppCreds) {
+  } else if (isProd && isExternalHosting && !googleAppCreds) {
     throw new Error('Missing FIREBASE_SERVICE_ACCOUNT_KEY or GOOGLE_APPLICATION_CREDENTIALS in production.');
   }
 

@@ -200,6 +200,22 @@ async function runAllTests() {
       assert.strictEqual(app.options.projectId, EXPECTED_PROJECT_ID);
     });
 
+    // -------------------------------------------------------------
+    // TEST 7: Google Cloud Run / GCP runtime initializes natively in production
+    // -------------------------------------------------------------
+    await run('GCP Runtime: Production Cloud Run initializes using platform credentials', async () => {
+      await cleanupApps();
+      const app = createFirebaseAdminApp({
+        serviceAccountKeyJson: undefined,
+        googleAppCreds: undefined,
+        isProduction: true,
+        isExternalHosting: false,
+      });
+
+      assert(app, 'App must initialize on GCP runtime in production without requiring manual keys');
+      assert.strictEqual(app.options.projectId, EXPECTED_PROJECT_ID);
+    });
+
     console.log(`\n🎉 Firebase Admin Credential Security Suite Completed: ${passed}/${total} passed!\n`);
   } finally {
     // Restore clean singleton state for subsequent modules/server
