@@ -34,6 +34,15 @@ import { PrivateRoomPreview } from './src/types.js';
 
 dotenv.config();
 
+// Process-level resilience: Prevent unexpected dev server deaths from unhandled exceptions
+process.on('unhandledRejection', (reason, promise) => {
+  console.warn('[Server] Unhandled Promise Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Critical Uncaught Exception:', err);
+});
+
 if (!process.env.ROOM_ACCESS_PEPPER && process.env.NODE_ENV !== 'production') {
   process.env.ROOM_ACCESS_PEPPER = 'dev_gaming_hub_room_access_pepper_2026_secure';
 }
@@ -44,10 +53,16 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 function getPort(): number {
-  const portArgIndex = process.argv.indexOf('--port');
-  if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
-    const parsed = parseInt(process.argv[portArgIndex + 1], 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
+  for (let i = 0; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (arg === '--port' || arg === '-p') {
+      const val = parseInt(process.argv[i + 1], 10);
+      if (!isNaN(val) && val > 0) return val;
+    }
+    if (arg.startsWith('--port=')) {
+      const val = parseInt(arg.split('=')[1], 10);
+      if (!isNaN(val) && val > 0) return val;
+    }
   }
   // In production (e.g. Cloud Run), honor process.env.PORT (typically 8080)
   if (process.env.NODE_ENV === 'production' && process.env.PORT) {
@@ -63,9 +78,14 @@ function getPort(): number {
 }
 
 function getHost(): string {
-  const hostArgIndex = process.argv.indexOf('--host');
-  if (hostArgIndex !== -1 && process.argv[hostArgIndex + 1]) {
-    return process.argv[hostArgIndex + 1];
+  for (let i = 0; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (arg === '--host' || arg === '-h') {
+      if (process.argv[i + 1]) return process.argv[i + 1];
+    }
+    if (arg.startsWith('--host=')) {
+      return arg.split('=')[1];
+    }
   }
   return '0.0.0.0';
 }
@@ -1110,9 +1130,27 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`🎮 Gaming Hub server running on http://${HOST}:${PORT} [${isDev ? 'DEV' : 'PROD'}]`);
   });
+
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[Server] Port ${PORT} already in use. Retrying or awaiting cleanup...`);
+    } else {
+      console.error('[Server] Critical HTTP listen error:', err);
+    }
+  });
+
+  const shutdown = () => {
+    server.close(() => {
+      console.log('[Server] Gracefully closed Gaming Hub server');
+      process.exit(0);
+    });
+  };
+
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 if (process.env.NODE_ENV !== 'test') {

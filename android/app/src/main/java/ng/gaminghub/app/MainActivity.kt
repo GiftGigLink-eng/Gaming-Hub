@@ -20,6 +20,7 @@ import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import kotlinx.coroutines.launch
 import ng.gaminghub.app.broadcaster.GamingHubBridge
 import ng.gaminghub.app.broadcaster.ScreenCaptureService
+import ng.gaminghub.app.observer.AIMatchObserverService
 import org.json.JSONObject
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
@@ -60,8 +61,23 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(AndroidBridge(this), "AndroidBridge")
         webView.addJavascriptInterface(GamingHubBridge(this), "GamingHubAndroidBridge")
 
+        // Connect AI Match Observer native event listener to WebView
+        AIMatchObserverService.eventListener = { event, payload ->
+            dispatchObserverEvent(event, payload)
+        }
+
         // Load the Gaming Hub web app
         webView.loadUrl("https://ais-dev-r3pz3vsqrgvcuj3brgk6ae-193674771200.europe-west2.run.app")
+    }
+
+    /**
+     * Dispatches observer telemetry and state events to WebView.
+     */
+    fun dispatchObserverEvent(event: String, payload: JSONObject) {
+        webView.post {
+            val script = "(function() { window.dispatchEvent(new CustomEvent('$event', { detail: $payload })); })();"
+            webView.evaluateJavascript(script, null)
+        }
     }
 
     /**
@@ -177,6 +193,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        // 1. LiveKit WebRTC Screen Broadcast
         if (requestCode == GamingHubBridge.REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 val options = GamingHubBridge.pendingBroadcastOptions
@@ -209,9 +227,51 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        // 2. Dedicated Local On-Device AI Match Observer
+        if (requestCode == GamingHubBridge.REQUEST_MEDIA_OBSERVER) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                val options = GamingHubBridge.pendingObserverOptions
+                val serviceIntent = Intent(this, AIMatchObserverService::class.java).apply {
+                    action = AIMatchObserverService.ACTION_START
+                    putExtra(AIMatchObserverService.EXTRA_RESULT_CODE, resultCode)
+                    putExtra(AIMatchObserverService.EXTRA_RESULT_DATA, data)
+                    putExtra(AIMatchObserverService.EXTRA_OPPORTUNITY_ID, options?.optString("opportunityId"))
+                    putExtra(AIMatchObserverService.EXTRA_GAME_ID, options?.optString("gameId"))
+                    putExtra(AIMatchObserverService.EXTRA_GAME_TITLE, options?.optString("gameTitle", "Mobile Game"))
+                    putExtra(AIMatchObserverService.EXTRA_PACKAGE_ID, options?.optString("packageId"))
+                    putExtra(AIMatchObserverService.EXTRA_TARGET_FPS, options?.optInt("targetFps", 1) ?: 1)
+                }
+                ContextCompat.startForegroundService(this, serviceIntent)
+
+                webView.post {
+                    val detail = JSONObject().apply {
+                        put("active", true)
+                        put("opportunityId", options?.optString("opportunityId") ?: "")
+                        put("gameTitle", options?.optString("gameTitle", "Mobile Game"))
+                    }
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('gaminghub:native_observer_started', { detail: $detail }));",
+                        null
+                    )
+                }
+            } else {
+                GamingHubBridge.pendingObserverOptions = null
+                webView.post {
+                    val detail = JSONObject().apply {
+                        put("error", "MediaProjection observation permission was denied by user")
+                    }
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('gaminghub:native_observer_denied', { detail: $detail }));",
+                        null
+                    )
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
+        AIMatchObserverService.eventListener = null
         webView.destroy()
         super.onDestroy()
     }

@@ -31,6 +31,9 @@
         <package android:name="com.gameloft.android.ANMP.GloftA9HM" />
         <package android:name="com.miHoYo.GenshinImpact" />
         <package android:name="com.nekki.shadowfightarena" />
+        <!-- Blood Strike package IDs -->
+        <package android:name="com.netease.bloodstrike" />
+        <package android:name="com.netease.g104na" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
@@ -58,9 +61,16 @@
             </intent-filter>
         </activity>
 
-        <!-- MediaProjection Foreground Service for screen & internal audio capture -->
+        <!-- MediaProjection Foreground Service for screen & internal audio broadcast (LiveKit) -->
         <service
             android:name=".broadcaster.ScreenCaptureService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- AI Match Observer Foreground Service for low-power, local on-device frame observation -->
+        <service
+            android:name=".observer.AIMatchObserverService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />

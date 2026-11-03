@@ -39,6 +39,9 @@ declare global {
       startBroadcast: (optionsJson: string) => string;
       stopBroadcast: () => string;
       getBroadcastStatus: () => string;
+      startObservation?: (optionsJson: string) => string;
+      stopObservation?: () => string;
+      getObservationStatus?: () => string;
     };
   }
 }
