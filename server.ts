@@ -31,8 +31,39 @@ import { authenticateFirebaseUser, AuthenticatedRequest, verifyFirebaseIdToken }
 import { legacySessionStartHandler } from './src/server/legacySession.js';
 import { livekitService, LiveKitCredentialsMissingError, UnauthorizedStreamHostError } from './src/server/livekitService.js';
 import { PrivateRoomPreview } from './src/types.js';
+import {
+  handleRegister,
+  handleLinkCredentials,
+  handleLogin,
+  handleRefresh,
+  handleLogout,
+} from './src/server/auth/authController.js';
+import { authRateLimiter } from './src/server/auth/authRateLimiter.js';
+import { validateJwtSecretOnStartup } from './src/server/auth/tokenService.js';
 
 dotenv.config();
+
+// Eagerly validate JWT configuration on boot
+try {
+  validateJwtSecretOnStartup();
+} catch (err: any) {
+  // If running in managed deployment (e.g. Cloud Run rollout) where GAMING_HUB_JWT_SECRET is not yet injected via env,
+  // warn and allow container health checks to pass so the existing Firebase app functions normally.
+  // Independent auth endpoints (/api/auth/*) fail closed until the secret is explicitly provisioned.
+  // Re-throw immediately if a secret WAS provided but is invalid, too short (<32 chars), or an insecure placeholder.
+  if (process.env.NODE_ENV === 'production' && !process.env.GAMING_HUB_JWT_SECRET) {
+    console.warn('[Server] WARNING: GAMING_HUB_JWT_SECRET is not configured in production environment.');
+    console.warn('[Server] Container will boot for Cloud Run health checks, but independent auth endpoints (/api/auth/*) remain fail-closed until secret is provisioned.');
+  } else {
+    throw err;
+  }
+}
+
+
+// Enforce HMR disabled in development environment to avoid port collisions and CPU overhead
+if (process.env.DISABLE_HMR === undefined) {
+  process.env.DISABLE_HMR = 'true';
+}
 
 // Process-level resilience: Prevent unexpected dev server deaths from unhandled exceptions
 process.on('unhandledRejection', (reason, promise) => {
@@ -169,6 +200,23 @@ app.post('/api/auth/phone-login', (_req: Request, res: Response) => {
     code: 'GENUINE_FIREBASE_AUTH_REQUIRED',
   });
 });
+
+// Gaming Hub Independent Authentication Core (Stage 2)
+// Registration endpoint with abuse rate-limiting
+app.post('/api/auth/register', authRateLimiter.registerRateLimitMiddleware(), handleRegister);
+
+// Credential linking endpoint for existing Firebase users
+app.post('/api/auth/link-credentials', authRateLimiter.registerRateLimitMiddleware(), handleLinkCredentials);
+
+// Login endpoint with IP-scoped abuse protection and timing normalization
+app.post('/api/auth/login', authRateLimiter.loginRateLimitMiddleware(), handleLogin);
+
+
+// Refresh endpoint with replay attack detection and token rotation
+app.post('/api/auth/refresh', authRateLimiter.refreshRateLimitMiddleware(), handleRefresh);
+
+// Logout endpoint with session revocation
+app.post('/api/auth/logout', handleLogout);
 
 // Current User Profile (Protected - Identity derived exclusively from verified token)
 app.get('/api/auth/user', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
@@ -1113,15 +1161,33 @@ async function startServer() {
   const isDev = process.env.NODE_ENV !== 'production';
 
   if (isDev) {
+    process.env.DISABLE_HMR = 'true';
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         hmr: false,
+        watch: null,
       },
       appType: 'spa',
     });
     app.use(vite.middlewares);
+
+    // Development SPA HTML transform fallback
+    app.use('*', async (req, res, next) => {
+      const url = req.originalUrl;
+      if (url.startsWith('/api')) {
+        return next();
+      }
+      try {
+        const fs = await import('fs/promises');
+        let template = await fs.readFile(path.resolve(__dirname, 'index.html'), 'utf-8');
+        template = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+      } catch (e) {
+        next(e);
+      }
+    });
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
@@ -1130,27 +1196,48 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, HOST, () => {
-    console.log(`🎮 Gaming Hub server running on http://${HOST}:${PORT} [${isDev ? 'DEV' : 'PROD'}]`);
-  });
+  let retryCount = 0;
+  const maxRetries = 10;
 
-  server.on('error', (err: any) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`[Server] Port ${PORT} already in use. Retrying or awaiting cleanup...`);
-    } else {
-      console.error('[Server] Critical HTTP listen error:', err);
-    }
-  });
-
-  const shutdown = () => {
-    server.close(() => {
-      console.log('[Server] Gracefully closed Gaming Hub server');
-      process.exit(0);
+  function listenWithRetry() {
+    const server = app.listen(PORT, HOST, () => {
+      console.log(`🎮 Gaming Hub server running on http://${HOST}:${PORT} [${isDev ? 'DEV' : 'PROD'}]`);
     });
-  };
 
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
+    server.on('error', (err: any) => {
+      if (err.code === 'EADDRINUSE' && retryCount < maxRetries) {
+        retryCount++;
+        console.warn(`[Server] Port ${PORT} occupied (attempt ${retryCount}/${maxRetries}), retrying in 500ms...`);
+        setTimeout(() => {
+          try {
+            server.close();
+          } catch (_) {}
+          listenWithRetry();
+        }, 500);
+      } else {
+        console.error('[Server] Critical HTTP listen error:', err);
+      }
+    });
+
+    const shutdown = (signal: string) => {
+      console.log(`[Server] Received ${signal}, closing Gaming Hub server...`);
+      if (typeof (server as any).closeAllConnections === 'function') {
+        (server as any).closeAllConnections();
+      }
+      server.close(() => {
+        console.log('[Server] Gracefully closed Gaming Hub server');
+        process.exit(0);
+      });
+      setTimeout(() => {
+        process.exit(0);
+      }, 1000).unref();
+    };
+
+    process.once('SIGTERM', () => shutdown('SIGTERM'));
+    process.once('SIGINT', () => shutdown('SIGINT'));
+  }
+
+  listenWithRetry();
 }
 
 if (process.env.NODE_ENV !== 'test') {

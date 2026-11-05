@@ -119,6 +119,7 @@ export { adminApp };
 export interface AuthenticatedUser {
   uid: string;
   email?: string;
+  emailVerified?: boolean;
   phoneNumber?: string;
 }
 
@@ -127,7 +128,7 @@ export interface AuthenticatedRequest extends Request {
 }
 
 // Custom token verifier interface to support test mocking without exposing production keys
-type TokenVerifierFn = (token: string) => Promise<AuthenticatedUser>;
+type TokenVerifierFn = (token: string, checkRevocation?: boolean) => Promise<AuthenticatedUser>;
 
 let customTokenVerifier: TokenVerifierFn | null = null;
 
@@ -139,23 +140,26 @@ export function setCustomTokenVerifier(verifier: TokenVerifierFn | null) {
 }
 
 /**
- * Verifies a Firebase ID token using Firebase Admin Auth
+ * Verifies a Firebase ID token using Firebase Admin Auth.
+ * When checkRevocation is true, checks whether the token has been revoked in Firebase Auth.
  */
-export async function verifyFirebaseIdToken(token: string): Promise<AuthenticatedUser> {
+export async function verifyFirebaseIdToken(token: string, checkRevocation = false): Promise<AuthenticatedUser> {
   // If a test harness verifier is registered (for automated unit testing in non-production), use it
   if (process.env.NODE_ENV !== 'production' && customTokenVerifier) {
-    return await customTokenVerifier(token);
+    return await customTokenVerifier(token, checkRevocation);
   }
 
   // Real Firebase Admin SDK verification
   const auth = getAuth(adminApp);
-  const decoded: DecodedIdToken = await auth.verifyIdToken(token);
+  const decoded: DecodedIdToken = await auth.verifyIdToken(token, checkRevocation);
   return {
     uid: decoded.uid,
     email: decoded.email,
+    emailVerified: Boolean(decoded.email_verified),
     phoneNumber: decoded.phone_number,
   };
 }
+
 
 /**
  * Express Middleware: authenticateFirebaseUser
