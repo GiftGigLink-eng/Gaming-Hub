@@ -32,7 +32,8 @@ import {
 } from '../src/server/auth/authController.js';
 import { setCustomTokenVerifier, authenticateFirebaseUser } from '../src/server/firebaseAdmin.js';
 
-// Initialize a secure 256-bit test secret for non-production test execution
+// Explicitly configure test environment
+process.env.NODE_ENV = 'test';
 process.env.GAMING_HUB_JWT_SECRET = crypto.randomBytes(32).toString('hex');
 
 console.log('🎮 Starting Gaming Hub Stage 2.8 Final Authentication Hardening Test Suite...\n');
@@ -90,6 +91,38 @@ function createMockReqRes(body: any = {}, headers: Record<string, string> = {}, 
 }
 
 async function runAllTests() {
+  // Explicitly ensure NODE_ENV='test' for unit test execution
+  process.env.NODE_ENV = 'test';
+
+  // Verify strict environment guard: rejects production, development, staging, and undefined
+  const originalEnv = process.env.NODE_ENV;
+  try {
+    const rejectedEnvironments = ['production', 'development', 'staging', undefined];
+    for (const env of rejectedEnvironments) {
+      if (env === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = env;
+      }
+      assert.throws(
+        () => authRepo.setTestFirestoreInstance(null),
+        /setTestFirestoreInstance is only permitted when NODE_ENV === 'test'/,
+        `setTestFirestoreInstance must reject environment: ${env}`
+      );
+    }
+  } finally {
+    process.env.NODE_ENV = originalEnv ?? 'test';
+  }
+
+  // Under NODE_ENV='test', verify setTestFirestoreInstance succeeds and strictly detaches Firestore
+  authRepo.setTestFirestoreInstance(null);
+  authRepo.resetInMemory();
+  assert.strictEqual(
+    authRepo.getFirestoreInstance(),
+    null,
+    'authRepo must have Firestore detached for isolated unit tests'
+  );
+
   const runId = Date.now();
   const testUserEmail = `player_${runId}@gaminghub.ng`;
   const existingFirebaseUid = `firebase_user_${runId}`;

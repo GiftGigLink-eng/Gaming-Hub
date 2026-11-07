@@ -103,6 +103,21 @@ export class AuthRepository {
   }
 
   /**
+   * Test-only configuration hook to attach or detach Firestore from the repository instance.
+   * Passing `null` forces the repository to operate strictly in-memory without contacting Google Cloud.
+   * Strictly prohibited outside of explicit test environments (NODE_ENV must be 'test').
+   */
+  public setTestFirestoreInstance(customDb: Firestore | null): void {
+    if (process.env.NODE_ENV !== 'test') {
+      throw new Error(
+        `setTestFirestoreInstance is only permitted when NODE_ENV === 'test'. Current environment: '${process.env.NODE_ENV || 'undefined'}'.`
+      );
+    }
+    this.db = customDb;
+    this.isExplicitDb = customDb !== null;
+  }
+
+  /**
    * Reset in-memory state (useful for isolated unit tests)
    */
   public resetInMemory(): void {
