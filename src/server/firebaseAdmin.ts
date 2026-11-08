@@ -121,6 +121,9 @@ export interface AuthenticatedUser {
   email?: string;
   emailVerified?: boolean;
   phoneNumber?: string;
+  role?: string;
+  authProvider?: 'firebase' | 'gaminghub';
+  sessionId?: string;
 }
 
 export interface AuthenticatedRequest extends Request {
@@ -137,6 +140,10 @@ export function setCustomTokenVerifier(verifier: TokenVerifierFn | null) {
     throw new Error('Custom token verifiers are strictly forbidden in production');
   }
   customTokenVerifier = verifier;
+}
+
+export function getCustomTokenVerifier(): TokenVerifierFn | null {
+  return customTokenVerifier;
 }
 
 /**

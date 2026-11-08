@@ -27,7 +27,12 @@ import {
 } from './src/server/firestoreRepository.js';
 import { paystackService } from './src/server/paystackService.js';
 import { gamesCatalogService } from './src/server/gamesCatalog.js';
-import { authenticateFirebaseUser, AuthenticatedRequest, verifyFirebaseIdToken } from './src/server/firebaseAdmin.js';
+import {
+  authenticateFirebaseUser,
+  AuthenticatedRequest,
+  verifyFirebaseIdToken,
+} from './src/server/firebaseAdmin.js';
+import { authenticateDualAuth } from './src/server/auth/authMiddleware.js';
 import { legacySessionStartHandler } from './src/server/legacySession.js';
 import { livekitService, LiveKitCredentialsMissingError, UnauthorizedStreamHostError } from './src/server/livekitService.js';
 import { PrivateRoomPreview } from './src/types.js';
@@ -219,7 +224,7 @@ app.post('/api/auth/refresh', authRateLimiter.refreshRateLimitMiddleware(), hand
 app.post('/api/auth/logout', handleLogout);
 
 // Current User Profile (Protected - Identity derived exclusively from verified token)
-app.get('/api/auth/user', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/auth/user', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     let user = await firestoreRepo.getUser(userId);
@@ -242,7 +247,7 @@ app.get('/api/auth/user', authenticateFirebaseUser, async (req: AuthenticatedReq
 });
 
 // Wallet Balance (Protected)
-app.get('/api/wallet', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/wallet', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const wallet = await firestoreRepo.getWallet(userId);
@@ -253,7 +258,7 @@ app.get('/api/wallet', authenticateFirebaseUser, async (req: AuthenticatedReques
 });
 
 // Transactions Ledger (Protected)
-app.get('/api/transactions', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/transactions', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const transactions = await firestoreRepo.getTransactions(userId);
@@ -273,7 +278,7 @@ app.get('/api/paystack/config', (_req: Request, res: Response) => {
 });
 
 // Paystack: Initialize Payment (Protected)
-app.post('/api/paystack/initialize', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/paystack/initialize', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { email, amount, phoneNumber } = req.body;
@@ -300,7 +305,7 @@ app.post('/api/paystack/initialize', authenticateFirebaseUser, async (req: Authe
 });
 
 // Paystack: Server-Side Payment Verification (Protected - Credits verified UID)
-app.post('/api/paystack/verify', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/paystack/verify', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { reference } = req.body;
@@ -333,7 +338,7 @@ app.post('/api/paystack/webhook', async (req: any, res: Response) => {
 // --- STAGE 3: MATCH OPPORTUNITIES ENGINE (₦100/MATCH) ---
 
 // Purchase Match Opportunity (Atomic ₦100 deduction & persistent opportunity creation)
-app.post('/api/opportunities/purchase', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/purchase', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { gameId, gameTitle, idempotencyKey } = req.body;
@@ -366,7 +371,7 @@ app.post('/api/opportunities/purchase', authenticateFirebaseUser, async (req: Au
 });
 
 // List Match Opportunities for Authenticated User
-app.get('/api/opportunities', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/opportunities', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const status = req.query.status as any;
@@ -378,7 +383,7 @@ app.get('/api/opportunities', authenticateFirebaseUser, async (req: Authenticate
 });
 
 // Launch Match Opportunity
-app.post('/api/opportunities/launch', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/launch', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { gameId, opportunityId } = req.body;
@@ -397,7 +402,7 @@ app.post('/api/opportunities/launch', authenticateFirebaseUser, async (req: Auth
 });
 
 // Cancel / Refund Match Opportunity before launch (Restores ₦100)
-app.post('/api/opportunities/refund', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/refund', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { opportunityId, reason } = req.body;
@@ -429,7 +434,7 @@ app.post('/api/opportunities/refund', authenticateFirebaseUser, async (req: Auth
 });
 
 // Complete Match Opportunity (Conclude match after play)
-app.post('/api/opportunities/complete', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/complete', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { opportunityId } = req.body;
@@ -457,10 +462,10 @@ app.post('/api/opportunities/complete', authenticateFirebaseUser, async (req: Au
 
 // --- LEGACY SESSIONS (Permanently Retired in Stage 3 - Disabled for Safety) ---
 // Session: Start ₦100 1-Hour Session (Disabled: Cannot deduct funds or start sessions)
-app.post('/api/sessions/start', authenticateFirebaseUser, legacySessionStartHandler);
+app.post('/api/sessions/start', authenticateDualAuth, legacySessionStartHandler);
 
 // Session: Get Active Session with Live Countdown (Protected)
-app.get('/api/sessions/active', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/sessions/active', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const session = await firestoreRepo.getActiveSession(userId);
@@ -471,7 +476,7 @@ app.get('/api/sessions/active', authenticateFirebaseUser, async (req: Authentica
 });
 
 // Session: End Session Early (Protected)
-app.post('/api/sessions/end', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/sessions/end', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { sessionId } = req.body;
@@ -514,7 +519,7 @@ app.get('/api/games', async (req: Request, res: Response) => {
 });
 
 // Add custom game entry (Protected)
-app.post('/api/games/custom', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/games/custom', authenticateDualAuth, (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { name, packageId, category, description, iconUrl, bannerUrl } = req.body;
@@ -535,7 +540,7 @@ app.post('/api/games/custom', authenticateFirebaseUser, (req: AuthenticatedReque
 });
 
 // Launch game with shared session authorization (Protected)
-app.post('/api/games/launch', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/games/launch', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { gameId, opportunityId } = req.body;
@@ -555,7 +560,7 @@ app.post('/api/games/launch', authenticateFirebaseUser, async (req: Authenticate
 });
 
 // Get recently played games (Protected)
-app.get('/api/games/recent', authenticateFirebaseUser, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/games/recent', authenticateDualAuth, (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.uid;
   const games = gamesCatalogService.getRecentlyPlayed(userId);
   res.json({ success: true, games });
@@ -582,7 +587,7 @@ app.get('/api/runtime-info', (_req: Request, res: Response) => {
 // ==========================================
 
 // Create Room (Protected)
-app.post('/api/rooms', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -696,7 +701,7 @@ app.get('/api/rooms/:roomId', async (req: Request, res: Response) => {
 });
 
 // Reset Room PIN (Host Only)
-app.post('/api/rooms/:roomId/pin/reset', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/pin/reset', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -727,7 +732,7 @@ app.post('/api/rooms/:roomId/pin/reset', authenticateFirebaseUser, async (req: A
 });
 
 // Join Room (Protected) - Universal Capacity & Scrypt PIN Verification
-app.post('/api/rooms/:roomId/join', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/join', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -761,7 +766,7 @@ app.post('/api/rooms/:roomId/join', authenticateFirebaseUser, async (req: Authen
 });
 
 // Create Room Invitation (Host Only)
-app.post('/api/rooms/:roomId/invitations', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/invitations', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -789,7 +794,7 @@ app.post('/api/rooms/:roomId/invitations', authenticateFirebaseUser, async (req:
 });
 
 // List Room Invitations (Host Only)
-app.get('/api/rooms/:roomId/invitations', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/rooms/:roomId/invitations', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -808,7 +813,7 @@ app.get('/api/rooms/:roomId/invitations', authenticateFirebaseUser, async (req: 
 });
 
 // Revoke Room Invitation (Host Only)
-app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId, invitationId } = req.params;
@@ -830,7 +835,7 @@ app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateFire
 });
 
 // Redeem Invitation Atomically (Protected)
-app.post('/api/rooms/:roomId/invitations/redeem', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/invitations/redeem', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -879,7 +884,7 @@ app.post('/api/rooms/:roomId/invitations/redeem', authenticateFirebaseUser, asyn
 });
 
 // Leave Room (Protected)
-app.post('/api/rooms/:roomId/leave', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/leave', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -894,7 +899,7 @@ app.post('/api/rooms/:roomId/leave', authenticateFirebaseUser, async (req: Authe
 });
 
 // Close Room (Protected, Host Only)
-app.post('/api/rooms/:roomId/close', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/close', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -912,7 +917,7 @@ app.post('/api/rooms/:roomId/close', authenticateFirebaseUser, async (req: Authe
 });
 
 // Update Room Status (Protected, Host Only)
-app.post('/api/rooms/:roomId/status', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/status', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -934,7 +939,7 @@ app.post('/api/rooms/:roomId/status', authenticateFirebaseUser, async (req: Auth
 });
 
 // Update Broadcast Status & Stream URL (Protected, Host Only)
-app.post('/api/rooms/:roomId/broadcast', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/broadcast', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -968,7 +973,7 @@ app.post('/api/rooms/:roomId/broadcast', authenticateFirebaseUser, async (req: A
 });
 
 // Viewer Presence Heartbeat (Protected, Authenticated Viewer)
-app.post('/api/rooms/:roomId/viewers/heartbeat', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/viewers/heartbeat', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -993,7 +998,7 @@ app.post('/api/rooms/:roomId/viewers/heartbeat', authenticateFirebaseUser, async
 });
 
 // Viewer Departure / Disconnect (Protected, Authenticated Viewer)
-app.post('/api/rooms/:roomId/viewers/leave', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/viewers/leave', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -1013,7 +1018,7 @@ app.post('/api/rooms/:roomId/viewers/leave', authenticateFirebaseUser, async (re
 });
 
 // LiveKit WebRTC Access Token (Protected, Scoped strictly by host vs viewer role)
-app.post('/api/rooms/:roomId/livekit-token', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/livekit-token', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -1082,7 +1087,7 @@ app.post('/api/rooms/:roomId/livekit-token', authenticateFirebaseUser, async (re
 
 
 // Send Chat Message (Protected, Room Participant Only)
-app.post('/api/rooms/:roomId/messages', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/messages', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -1113,7 +1118,7 @@ app.post('/api/rooms/:roomId/messages', authenticateFirebaseUser, async (req: Au
 });
 
 // Get Messages (Protected, Active Room Participants Only)
-app.get('/api/rooms/:roomId/messages', authenticateFirebaseUser, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/rooms/:roomId/messages', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -1245,3 +1250,5 @@ if (process.env.NODE_ENV !== 'test') {
     console.error('Failed to start Gaming Hub server:', err);
   });
 }
+
+export { app };
