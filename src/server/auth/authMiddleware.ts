@@ -69,8 +69,13 @@ export async function verifyDualToken(
           authProvider: fbUser.authProvider || 'firebase',
         };
       } catch (err: any) {
-        const error: any = new Error('Unauthorized: Token verification failed or expired.');
-        error.code = 'AUTH_TOKEN_VERIFICATION_FAILED';
+        const isRevoked = err.code === 'auth/id-token-revoked' || (err.message && err.message.toLowerCase().includes('revoked'));
+        const error: any = new Error(
+          isRevoked
+            ? 'Unauthorized: Firebase ID token has been revoked.'
+            : 'Unauthorized: Token verification failed or expired.'
+        );
+        error.code = isRevoked ? 'AUTH_TOKEN_REVOKED' : 'AUTH_TOKEN_VERIFICATION_FAILED';
         error.statusCode = 401;
         error.details = err.message;
         throw error;
@@ -154,8 +159,13 @@ export async function verifyDualToken(
         authProvider: 'firebase',
       };
     } catch (err: any) {
-      const error: any = new Error('Unauthorized: Token verification failed or expired.');
-      error.code = 'AUTH_TOKEN_VERIFICATION_FAILED';
+      const isRevoked = err.code === 'auth/id-token-revoked' || (err.message && err.message.toLowerCase().includes('revoked'));
+      const error: any = new Error(
+        isRevoked
+          ? 'Unauthorized: Firebase ID token has been revoked.'
+          : 'Unauthorized: Token verification failed or expired.'
+      );
+      error.code = isRevoked ? 'AUTH_TOKEN_REVOKED' : 'AUTH_TOKEN_VERIFICATION_FAILED';
       error.statusCode = 401;
       error.details = err.message;
       throw error;
@@ -243,6 +253,8 @@ export function createDualAuthMiddleware(options?: DualAuthOptions) {
 }
 
 export const authenticateDualAuth = createDualAuthMiddleware();
+export const authenticateDualAuthStrict = createDualAuthMiddleware({ checkRevocation: true });
+export const authenticateDualAuthWithRevocation = authenticateDualAuthStrict;
 
 // Aliases for seamless migration and integration
 export const authenticateUser = authenticateDualAuth;

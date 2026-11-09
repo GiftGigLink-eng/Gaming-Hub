@@ -144,6 +144,13 @@ export class UnauthorizedHostActionError extends Error {
   }
 }
 
+export class UnauthorizedOpportunityActionError extends Error {
+  constructor(message = 'Access denied: Match opportunity belongs to another gamer') {
+    super(message);
+    this.name = 'UnauthorizedOpportunityActionError';
+  }
+}
+
 export class ChatUnauthorizedError extends Error {
   constructor(message = 'Must be an active room participant to send chat messages.') {
     super(message);
@@ -787,7 +794,7 @@ export class FirestoreRepository {
         }
         const opp = snap.data() as MatchOpportunity;
         if (opp.userId !== userId) {
-          throw new Error('Access denied: Match opportunity belongs to another gamer');
+          throw new UnauthorizedOpportunityActionError('Access denied: Match opportunity belongs to another gamer');
         }
         if (opp.gameId !== gameId) {
           throw new Error(`Opportunity is for game '${opp.gameTitle || opp.gameId}', not '${gameId}'`);
@@ -868,7 +875,7 @@ export class FirestoreRepository {
       }
       const opp = snap.data() as MatchOpportunity;
       if (opp.userId !== userId) {
-        throw new Error('Access denied: Match opportunity belongs to another gamer');
+        throw new UnauthorizedOpportunityActionError('Access denied: Match opportunity belongs to another gamer');
       }
 
       // Idempotent cancellation: if already refunded, return existing state without duplicate credit
@@ -958,7 +965,7 @@ export class FirestoreRepository {
       }
       const opp = snap.data() as MatchOpportunity;
       if (opp.userId !== userId) {
-        throw new Error('Access denied: Match opportunity belongs to another gamer');
+        throw new UnauthorizedOpportunityActionError('Access denied: Match opportunity belongs to another gamer');
       }
 
       if (opp.status === 'completed') {

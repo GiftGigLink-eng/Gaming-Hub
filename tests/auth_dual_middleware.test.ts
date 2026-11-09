@@ -12,6 +12,7 @@ import {
 } from '../src/server/auth/tokenService.js';
 import {
   authenticateDualAuth,
+  authenticateDualAuthStrict,
   verifyDualToken,
 } from '../src/server/auth/authMiddleware.js';
 import {
@@ -620,7 +621,7 @@ async function runAllDualAuthTests() {
 
     try {
       // 1. Bob creates an opportunity
-      const bobUid = 'gh_bob_opp_owner';
+      const bobUid = `gh_bob_opp_owner_${crypto.randomUUID()}`;
       await firestoreRepo.upsertUser({
         id: bobUid,
         displayName: 'BobGamer',
@@ -630,11 +631,11 @@ async function runAllDualAuthTests() {
       });
       // Credit Bob's wallet with ₦1000 so purchase succeeds
       await firestoreRepo.creditWallet(bobUid, 1000, `tx_seed_bob_${crypto.randomUUID()}`);
-      const oppResult = await firestoreRepo.purchaseOpportunity(bobUid, 'game_free_fire', 'Free Fire', `key_bob_opp_${crypto.randomUUID()}`);
+      const oppResult = await firestoreRepo.purchaseOpportunity(bobUid, 'game_free_fire', `key_bob_opp_${crypto.randomUUID()}`, 'Free Fire');
       const bobOpportunityId = oppResult.opportunity.id;
 
       // 2. Alice authenticates with valid Gaming Hub token
-      const aliceUid = 'gh_alice_opp_attacker';
+      const aliceUid = `gh_alice_opp_attacker_${crypto.randomUUID()}`;
       const { token: aliceToken } = await createTestSession(aliceUid);
       await firestoreRepo.upsertUser({
         id: aliceUid,
@@ -659,11 +660,8 @@ async function runAllDualAuthTests() {
       const launchData = await launchRes.json();
       assert.strictEqual(launchRes.status, 403, 'Must return HTTP 403 Forbidden for cross-user launch');
       assert.strictEqual(launchData.authorized, false, 'Alice must not be authorized to launch Bob opportunity');
-      assert.match(
-        launchData.reason || launchData.error,
-        /belongs to another gamer/i,
-        'Server must reject cross-user opportunity launch'
-      );
+      assert.strictEqual(launchData.code, 'FORBIDDEN_RESOURCE_OWNER');
+      assert.strictEqual(launchData.error, 'Forbidden: You do not own this match opportunity.');
 
       // 4. Alice attempts to refund Bob's opportunity WITHOUT passing userId
       const refundRes = await fetch(`${baseUrl}/api/opportunities/refund`, {
@@ -678,13 +676,42 @@ async function runAllDualAuthTests() {
         }),
       });
       const refundData = await refundRes.json();
-      assert.strictEqual(refundRes.status, 500);
+      assert.strictEqual(refundRes.status, 403, 'Must return HTTP 403 Forbidden for cross-user refund');
       assert.strictEqual(refundData.success, false, 'Alice must not be able to refund Bob opportunity');
-      assert.match(
-        refundData.error,
-        /belongs to another gamer/i,
-        'Server must reject cross-user opportunity refund'
-      );
+      assert.strictEqual(refundData.code, 'FORBIDDEN_RESOURCE_OWNER');
+      assert.strictEqual(refundData.error, 'Forbidden: You do not own this match opportunity.');
+
+      // 5. Verify Bob's opportunity and wallet records remain unchanged after the rejected request
+      const bobWalletAfter = await firestoreRepo.getWallet(bobUid);
+      assert.strictEqual(bobWalletAfter.balance, 900, 'Bob wallet balance must remain ₦900 after rejected attack');
+
+      const aliceWalletAfter = await firestoreRepo.getWallet(aliceUid);
+      assert.strictEqual(aliceWalletAfter.balance, 0, 'Alice wallet balance must remain ₦0 after rejected attack');
+
+      const bobOpps = await firestoreRepo.getOpportunities(bobUid);
+      const bobTargetOpp = bobOpps.find((o) => o.id === bobOpportunityId);
+      assert.strictEqual(bobTargetOpp?.status, 'available', 'Bob opportunity must remain available after rejected attack');
+
+      // 6. Confirm legitimate owner can still refund their own opportunity
+      const { token: bobToken } = await createTestSession(bobUid);
+      const legitimateRefundRes = await fetch(`${baseUrl}/api/opportunities/refund`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${bobToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          opportunityId: bobOpportunityId,
+          reason: 'Legitimate owner refund',
+        }),
+      });
+      assert.strictEqual(legitimateRefundRes.status, 200, 'Legitimate owner refund must succeed');
+      const legitimateData = await legitimateRefundRes.json();
+      assert.strictEqual(legitimateData.success, true);
+      assert.strictEqual(legitimateData.opportunity.status, 'refunded');
+
+      const bobWalletRestored = await firestoreRepo.getWallet(bobUid);
+      assert.strictEqual(bobWalletRestored.balance, 1000, 'Bob wallet balance must be restored to ₦1000');
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -866,20 +893,22 @@ async function runAllDualAuthTests() {
   await runTest('18. Firebase Revocation Checking: verifyDualToken with checkRevocation rejects revoked tokens', async () => {
     setCustomTokenVerifier(async (token: string, checkRevocation = false) => {
       if (token === 'firebase_revoked_token' && checkRevocation) {
-        throw new Error('Firebase ID token has been revoked');
+        const err: any = new Error('Firebase ID token has been revoked');
+        err.code = 'auth/id-token-revoked';
+        throw err;
       }
       return { uid: 'fb_active_user' };
     });
 
     try {
-      // With checkRevocation=true, revoked token throws AUTH_TOKEN_VERIFICATION_FAILED
+      // With checkRevocation=true, revoked token throws AUTH_TOKEN_REVOKED or AUTH_TOKEN_VERIFICATION_FAILED
       await assert.rejects(
         async () => {
           await verifyDualToken('firebase_revoked_token', true);
         },
         (err: any) => {
-          assert.strictEqual(err.code, 'AUTH_TOKEN_VERIFICATION_FAILED');
-          assert.match(err.details, /revoked/i);
+          assert.ok(err.code === 'AUTH_TOKEN_REVOKED' || err.code === 'AUTH_TOKEN_VERIFICATION_FAILED');
+          assert.match(err.details || err.message, /revoked/i);
           return true;
         }
       );
@@ -890,6 +919,458 @@ async function runAllDualAuthTests() {
       assert.strictEqual(user.authProvider, 'firebase');
     } finally {
       setCustomTokenVerifier(null);
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 19: Revoked Firebase Token Rejected on Sensitive Mutation Route
+  // -------------------------------------------------------------
+  await runTest('19. Policy Enforcement: Revoked Firebase token rejected on sensitive mutation route (POST /api/opportunities/purchase)', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const revokedFbUid = 'fb_revoked_gamer_19';
+    setCustomTokenVerifier(async (token: string, checkRevocation = false) => {
+      if (token === 'revoked_firebase_token' && checkRevocation) {
+        const err: any = new Error('Firebase ID token has been revoked');
+        err.code = 'auth/id-token-revoked';
+        throw err;
+      }
+      if (token === 'revoked_firebase_token' && !checkRevocation) {
+        return { uid: revokedFbUid, email: 'revoked@example.com', emailVerified: true };
+      }
+      throw new Error('Unknown token');
+    });
+
+    try {
+      const purchaseRes = await fetch(`${baseUrl}/api/opportunities/purchase`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer revoked_firebase_token',
+        },
+        body: JSON.stringify({ gameId: 'game_free_fire', gameTitle: 'Free Fire' }),
+      });
+
+      assert.strictEqual(purchaseRes.status, 401, 'Sensitive mutation route MUST reject revoked Firebase token with HTTP 401');
+      const data = await purchaseRes.json();
+      assert.strictEqual(data.success, false);
+      assert.ok(data.code === 'AUTH_TOKEN_REVOKED' || data.code === 'AUTH_TOKEN_VERIFICATION_FAILED');
+    } finally {
+      setCustomTokenVerifier(null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 20: Revoked Firebase Token Rejected on Private Financial Route
+  // -------------------------------------------------------------
+  await runTest('20. Policy Enforcement: Revoked Firebase token rejected on private financial route (GET /api/wallet)', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const revokedFbUid = 'fb_revoked_gamer_20';
+    setCustomTokenVerifier(async (token: string, checkRevocation = false) => {
+      if (token === 'revoked_firebase_token_fin' && checkRevocation) {
+        const err: any = new Error('Firebase ID token has been revoked');
+        err.code = 'auth/id-token-revoked';
+        throw err;
+      }
+      if (token === 'revoked_firebase_token_fin' && !checkRevocation) {
+        return { uid: revokedFbUid, email: 'revoked_fin@example.com', emailVerified: true };
+      }
+      throw new Error('Unknown token');
+    });
+
+    try {
+      const walletRes = await fetch(`${baseUrl}/api/wallet`, {
+        headers: {
+          Authorization: 'Bearer revoked_firebase_token_fin',
+        },
+      });
+
+      assert.strictEqual(walletRes.status, 401, 'Private financial route GET /api/wallet MUST reject revoked Firebase token with HTTP 401');
+      const data = await walletRes.json();
+      assert.strictEqual(data.success, false);
+      assert.ok(data.code === 'AUTH_TOKEN_REVOKED' || data.code === 'AUTH_TOKEN_VERIFICATION_FAILED');
+    } finally {
+      setCustomTokenVerifier(null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 21: Valid Firebase Token Continues to Work on Protected Routes
+  // -------------------------------------------------------------
+  await runTest('21. Compatibility: Valid Firebase token accepted on protected routes (GET /api/wallet)', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const validFbUid = `fb_valid_${crypto.randomUUID().slice(0, 8)}`;
+    await firestoreRepo.upsertUser({
+      id: validFbUid,
+      displayName: 'ValidFbUser',
+      phoneNumber: '+2348011223344',
+      role: 'user',
+      createdAt: new Date().toISOString(),
+    });
+
+    setCustomTokenVerifier(async (token: string) => {
+      if (token === 'valid_active_firebase_token') {
+        return { uid: validFbUid, email: 'valid_fb@example.com', emailVerified: true, role: 'user' };
+      }
+      throw new Error('Invalid token');
+    });
+
+    try {
+      const walletRes = await fetch(`${baseUrl}/api/wallet`, {
+        headers: {
+          Authorization: 'Bearer valid_active_firebase_token',
+        },
+      });
+
+      assert.strictEqual(walletRes.status, 200, 'Valid Firebase token MUST succeed with HTTP 200');
+      const data = await walletRes.json();
+      assert.strictEqual(data.success, true);
+      assert.ok(data.wallet);
+      assert.strictEqual(data.wallet.userId, validFbUid);
+    } finally {
+      setCustomTokenVerifier(null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 22: Valid Gaming Hub Token Continues to Work on Protected Routes
+  // -------------------------------------------------------------
+  await runTest('22. Compatibility: Valid Gaming Hub token accepted on protected routes (GET /api/wallet)', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const ghUid = `gh_valid_${crypto.randomUUID().slice(0, 8)}`;
+    await firestoreRepo.upsertUser({
+      id: ghUid,
+      displayName: 'ValidGhUser',
+      phoneNumber: '+2348055667788',
+      role: 'user',
+      createdAt: new Date().toISOString(),
+    });
+
+    const { token } = await createTestSession(ghUid);
+
+    try {
+      const walletRes = await fetch(`${baseUrl}/api/wallet`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      assert.strictEqual(walletRes.status, 200, 'Valid Gaming Hub token MUST succeed with HTTP 200');
+      const data = await walletRes.json();
+      assert.strictEqual(data.success, true);
+      assert.ok(data.wallet);
+      assert.strictEqual(data.wallet.userId, ghUid);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 23: Gaming Hub Session Revocation Remains Enforced
+  // -------------------------------------------------------------
+  await runTest('23. Security: Revoked Gaming Hub session rejected on protected route (HTTP 401 SESSION_REVOKED)', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const ghRevokedUid = `gh_revoked_${crypto.randomUUID().slice(0, 8)}`;
+    const { token } = await createTestSession(ghRevokedUid, { revoked: true });
+
+    try {
+      const walletRes = await fetch(`${baseUrl}/api/wallet`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      assert.strictEqual(walletRes.status, 401, 'Revoked Gaming Hub session MUST return HTTP 401');
+      const data = await walletRes.json();
+      assert.strictEqual(data.success, false);
+      assert.strictEqual(data.code, 'SESSION_REVOKED');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 24: Documented Lower-Risk Read Policy Verified
+  // -------------------------------------------------------------
+  await runTest('24. Documented Policy: Lower-risk read route (GET /api/games/recent) allows valid signature without identitytoolkit check while sensitive route rejects', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const testUid = `fb_test_policy_${crypto.randomUUID().slice(0, 8)}`;
+
+    // Set mock verifier that succeeds if checkRevocation is false, but fails if checkRevocation is true
+    setCustomTokenVerifier(async (token: string, checkRevocation = false) => {
+      if (token === 'policy_token_partially_revoked') {
+        if (checkRevocation) {
+          const err: any = new Error('Firebase ID token has been revoked');
+          err.code = 'auth/id-token-revoked';
+          throw err;
+        }
+        return { uid: testUid, email: 'policy@example.com', emailVerified: true };
+      }
+      throw new Error('Unknown token');
+    });
+
+    try {
+      // 1. Lower-risk read route: GET /api/games/recent uses authenticateDualAuth (checkRevocation: false)
+      const recentRes = await fetch(`${baseUrl}/api/games/recent`, {
+        headers: {
+          Authorization: 'Bearer policy_token_partially_revoked',
+        },
+      });
+      assert.strictEqual(recentRes.status, 200, 'Documented lower-risk read route MUST succeed with checkRevocation: false');
+      const recentData = await recentRes.json();
+      assert.strictEqual(recentData.success, true);
+      assert.ok(Array.isArray(recentData.games));
+
+      // 2. Sensitive financial route: GET /api/wallet uses authenticateDualAuthStrict (checkRevocation: true)
+      const walletRes = await fetch(`${baseUrl}/api/wallet`, {
+        headers: {
+          Authorization: 'Bearer policy_token_partially_revoked',
+        },
+      });
+      assert.strictEqual(walletRes.status, 401, 'Sensitive route MUST reject the same token with HTTP 401');
+      const walletData = await walletRes.json();
+      assert.strictEqual(walletData.success, false);
+      assert.ok(walletData.code === 'AUTH_TOKEN_REVOKED' || walletData.code === 'AUTH_TOKEN_VERIFICATION_FAILED');
+    } finally {
+      setCustomTokenVerifier(null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 25: Viewer Presence Heartbeat Revocation & State Invariant
+  // -------------------------------------------------------------
+  await runTest('25. Viewer Heartbeat: Revoked Firebase/GamingHub tokens rejected (401) with zero Firestore state changes; valid tokens succeed', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    // 1. Create a public room
+    const hostUid = `host_hb_${crypto.randomUUID().slice(0, 8)}`;
+    await firestoreRepo.upsertUser({
+      id: hostUid,
+      displayName: 'HostHb',
+      phoneNumber: '+2348011229988',
+      role: 'user',
+      createdAt: new Date().toISOString(),
+    });
+    const room = await firestoreRepo.createRoom(
+      hostUid,
+      'HostHb',
+      'game_free_fire',
+      'Free Fire',
+      'Viewer Heartbeat Test',
+      'public'
+    );
+
+    const initialRoom = await firestoreRepo.getRoom(room.id);
+    const initialViewerCount = initialRoom!.viewerCount;
+    const initialActiveViewersJson = JSON.stringify(initialRoom!.activeViewers);
+    const initialUpdatedAt = initialRoom!.updatedAt;
+
+    setCustomTokenVerifier(async (token: string, checkRevocation = false) => {
+      if (token === 'fb_revoked_heartbeat_token' && checkRevocation) {
+        const err: any = new Error('Firebase ID token has been revoked');
+        err.code = 'auth/id-token-revoked';
+        throw err;
+      }
+      if (token === 'fb_valid_heartbeat_token') {
+        return { uid: 'fb_valid_viewer_1', email: 'viewer1@example.com', emailVerified: true };
+      }
+      throw new Error('Unknown token');
+    });
+
+    try {
+      // Step A: Revoked Firebase token cannot send a heartbeat (HTTP 401)
+      const rejectedFbRes = await fetch(`${baseUrl}/api/rooms/${room.id}/viewers/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer fb_revoked_heartbeat_token',
+        },
+        body: JSON.stringify({ displayName: 'Attacker' }),
+      });
+      assert.strictEqual(rejectedFbRes.status, 401, 'Revoked Firebase token MUST receive HTTP 401 on heartbeat');
+      const rejectedFbData = await rejectedFbRes.json();
+      assert.strictEqual(rejectedFbData.success, false);
+      assert.ok(rejectedFbData.code === 'AUTH_TOKEN_REVOKED' || rejectedFbData.code === 'AUTH_TOKEN_VERIFICATION_FAILED');
+
+      // Verify room state, activeViewers, viewerCount, and updatedAt remain UNCHANGED
+      const roomAfterRejectedFb = await firestoreRepo.getRoom(room.id);
+      assert.strictEqual(roomAfterRejectedFb!.viewerCount, initialViewerCount, 'viewerCount must remain unchanged');
+      assert.strictEqual(JSON.stringify(roomAfterRejectedFb!.activeViewers), initialActiveViewersJson, 'activeViewers must remain unchanged');
+      assert.strictEqual(roomAfterRejectedFb!.updatedAt, initialUpdatedAt, 'updatedAt must remain unchanged');
+
+      // Step B: Revoked Gaming Hub session token cannot send a heartbeat (HTTP 401 SESSION_REVOKED)
+      const ghRevokedUid = `gh_rev_${crypto.randomUUID().slice(0, 8)}`;
+      const { token: ghRevokedToken } = await createTestSession(ghRevokedUid, { revoked: true });
+      const rejectedGhRes = await fetch(`${baseUrl}/api/rooms/${room.id}/viewers/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ghRevokedToken}`,
+        },
+        body: JSON.stringify({ displayName: 'RevokedGH' }),
+      });
+      assert.strictEqual(rejectedGhRes.status, 401, 'Revoked Gaming Hub session MUST receive HTTP 401');
+      const rejectedGhData = await rejectedGhRes.json();
+      assert.strictEqual(rejectedGhData.code, 'SESSION_REVOKED');
+
+      // Verify room state remains UNCHANGED
+      const roomAfterRejectedGh = await firestoreRepo.getRoom(room.id);
+      assert.strictEqual(roomAfterRejectedGh!.viewerCount, initialViewerCount, 'viewerCount must remain unchanged');
+      assert.strictEqual(JSON.stringify(roomAfterRejectedGh!.activeViewers), initialActiveViewersJson, 'activeViewers must remain unchanged');
+      assert.strictEqual(roomAfterRejectedGh!.updatedAt, initialUpdatedAt, 'updatedAt must remain unchanged');
+
+      // Step C: Valid Firebase token CAN send a heartbeat (HTTP 200)
+      const validFbRes = await fetch(`${baseUrl}/api/rooms/${room.id}/viewers/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer fb_valid_heartbeat_token',
+        },
+        body: JSON.stringify({ displayName: 'ValidViewer1' }),
+      });
+      assert.strictEqual(validFbRes.status, 200, 'Valid Firebase token MUST receive HTTP 200 on heartbeat');
+      const validFbData = await validFbRes.json();
+      assert.strictEqual(validFbData.success, true);
+      assert.strictEqual(validFbData.viewerCount, 1);
+      assert.ok(validFbData.activeViewers['fb_valid_viewer_1']);
+
+      // Step D: Valid Gaming Hub token CAN send a heartbeat (HTTP 200)
+      const ghValidUid = `gh_vld_${crypto.randomUUID().slice(0, 8)}`;
+      const { token: ghValidToken } = await createTestSession(ghValidUid);
+      const validGhRes = await fetch(`${baseUrl}/api/rooms/${room.id}/viewers/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ghValidToken}`,
+        },
+        body: JSON.stringify({ displayName: 'ValidViewer2' }),
+      });
+      assert.strictEqual(validGhRes.status, 200, 'Valid Gaming Hub token MUST receive HTTP 200 on heartbeat');
+      const validGhData = await validGhRes.json();
+      assert.strictEqual(validGhData.success, true);
+      assert.strictEqual(validGhData.viewerCount, 2);
+      assert.ok(validGhData.activeViewers[ghValidUid]);
+    } finally {
+      setCustomTokenVerifier(null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Test 26: Viewer Departure Revocation & State Invariant
+  // -------------------------------------------------------------
+  await runTest('26. Viewer Departure: Revoked Firebase token cannot invoke departure; valid tokens leave cleanly', async () => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as any).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    // 1. Create a public room
+    const hostUid = `host_lv_${crypto.randomUUID().slice(0, 8)}`;
+    await firestoreRepo.upsertUser({
+      id: hostUid,
+      displayName: 'HostLeave',
+      phoneNumber: '+2348011229977',
+      role: 'user',
+      createdAt: new Date().toISOString(),
+    });
+    const room = await firestoreRepo.createRoom(
+      hostUid,
+      'HostLeave',
+      'game_free_fire',
+      'Free Fire',
+      'Viewer Departure Test',
+      'public'
+    );
+
+    // Seed room with an active viewer
+    await firestoreRepo.heartbeatViewer(room.id, 'viewer_existing', 'ExistingViewer');
+    const roomWithViewer = await firestoreRepo.getRoom(room.id);
+    const initialViewerCount = roomWithViewer!.viewerCount;
+    const initialActiveViewersJson = JSON.stringify(roomWithViewer!.activeViewers);
+    const initialUpdatedAt = roomWithViewer!.updatedAt;
+
+    setCustomTokenVerifier(async (token: string, checkRevocation = false) => {
+      if (token === 'fb_revoked_leave_token' && checkRevocation) {
+        const err: any = new Error('Firebase ID token has been revoked');
+        err.code = 'auth/id-token-revoked';
+        throw err;
+      }
+      if (token === 'fb_valid_leave_token') {
+        return { uid: 'viewer_existing', email: 'existing@example.com', emailVerified: true };
+      }
+      throw new Error('Unknown token');
+    });
+
+    try {
+      // Step A: Revoked Firebase token cannot invoke viewer departure (HTTP 401)
+      const rejectedFbRes = await fetch(`${baseUrl}/api/rooms/${room.id}/viewers/leave`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer fb_revoked_leave_token',
+        },
+      });
+      assert.strictEqual(rejectedFbRes.status, 401, 'Revoked Firebase token MUST receive HTTP 401 on leave');
+      const rejectedFbData = await rejectedFbRes.json();
+      assert.strictEqual(rejectedFbData.success, false);
+      assert.ok(rejectedFbData.code === 'AUTH_TOKEN_REVOKED' || rejectedFbData.code === 'AUTH_TOKEN_VERIFICATION_FAILED');
+
+      // Verify room state remains UNCHANGED
+      const roomAfterRejectedFb = await firestoreRepo.getRoom(room.id);
+      assert.strictEqual(roomAfterRejectedFb!.viewerCount, initialViewerCount, 'viewerCount must remain unchanged');
+      assert.strictEqual(JSON.stringify(roomAfterRejectedFb!.activeViewers), initialActiveViewersJson, 'activeViewers must remain unchanged');
+      assert.strictEqual(roomAfterRejectedFb!.updatedAt, initialUpdatedAt, 'updatedAt must remain unchanged');
+
+      // Step B: Valid Firebase token CAN invoke viewer departure (HTTP 200)
+      const validFbRes = await fetch(`${baseUrl}/api/rooms/${room.id}/viewers/leave`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer fb_valid_leave_token',
+        },
+      });
+      assert.strictEqual(validFbRes.status, 200, 'Valid Firebase token MUST receive HTTP 200 on leave');
+      const validFbData = await validFbRes.json();
+      assert.strictEqual(validFbData.success, true);
+      assert.strictEqual(validFbData.viewerCount, 0);
+      assert.strictEqual(validFbData.activeViewers['viewer_existing'], undefined);
+
+      // Verify room in Firestore reflects the departure
+      const roomAfterLeave = await firestoreRepo.getRoom(room.id);
+      assert.strictEqual(roomAfterLeave!.viewerCount, 0);
+      assert.strictEqual(roomAfterLeave!.activeViewers['viewer_existing'], undefined);
+    } finally {
+      setCustomTokenVerifier(null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

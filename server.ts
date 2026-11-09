@@ -23,6 +23,7 @@ import {
   InviteExpiredError,
   InviteUsageLimitExceededError,
   MalformedCursorError,
+  UnauthorizedOpportunityActionError,
   ensureFirestoreService,
 } from './src/server/firestoreRepository.js';
 import { paystackService } from './src/server/paystackService.js';
@@ -32,7 +33,7 @@ import {
   AuthenticatedRequest,
   verifyFirebaseIdToken,
 } from './src/server/firebaseAdmin.js';
-import { authenticateDualAuth } from './src/server/auth/authMiddleware.js';
+import { authenticateDualAuth, authenticateDualAuthStrict } from './src/server/auth/authMiddleware.js';
 import { legacySessionStartHandler } from './src/server/legacySession.js';
 import { livekitService, LiveKitCredentialsMissingError, UnauthorizedStreamHostError } from './src/server/livekitService.js';
 import { PrivateRoomPreview } from './src/types.js';
@@ -224,7 +225,7 @@ app.post('/api/auth/refresh', authRateLimiter.refreshRateLimitMiddleware(), hand
 app.post('/api/auth/logout', handleLogout);
 
 // Current User Profile (Protected - Identity derived exclusively from verified token)
-app.get('/api/auth/user', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/auth/user', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     let user = await firestoreRepo.getUser(userId);
@@ -247,7 +248,7 @@ app.get('/api/auth/user', authenticateDualAuth, async (req: AuthenticatedRequest
 });
 
 // Wallet Balance (Protected)
-app.get('/api/wallet', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/wallet', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const wallet = await firestoreRepo.getWallet(userId);
@@ -258,7 +259,7 @@ app.get('/api/wallet', authenticateDualAuth, async (req: AuthenticatedRequest, r
 });
 
 // Transactions Ledger (Protected)
-app.get('/api/transactions', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/transactions', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const transactions = await firestoreRepo.getTransactions(userId);
@@ -278,7 +279,7 @@ app.get('/api/paystack/config', (_req: Request, res: Response) => {
 });
 
 // Paystack: Initialize Payment (Protected)
-app.post('/api/paystack/initialize', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/paystack/initialize', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { email, amount, phoneNumber } = req.body;
@@ -305,7 +306,7 @@ app.post('/api/paystack/initialize', authenticateDualAuth, async (req: Authentic
 });
 
 // Paystack: Server-Side Payment Verification (Protected - Credits verified UID)
-app.post('/api/paystack/verify', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/paystack/verify', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { reference } = req.body;
@@ -338,7 +339,7 @@ app.post('/api/paystack/webhook', async (req: any, res: Response) => {
 // --- STAGE 3: MATCH OPPORTUNITIES ENGINE (₦100/MATCH) ---
 
 // Purchase Match Opportunity (Atomic ₦100 deduction & persistent opportunity creation)
-app.post('/api/opportunities/purchase', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/purchase', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { gameId, gameTitle, idempotencyKey } = req.body;
@@ -371,7 +372,7 @@ app.post('/api/opportunities/purchase', authenticateDualAuth, async (req: Authen
 });
 
 // List Match Opportunities for Authenticated User
-app.get('/api/opportunities', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/opportunities', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const status = req.query.status as any;
@@ -383,7 +384,7 @@ app.get('/api/opportunities', authenticateDualAuth, async (req: AuthenticatedReq
 });
 
 // Launch Match Opportunity
-app.post('/api/opportunities/launch', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/launch', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { gameId, opportunityId } = req.body;
@@ -393,16 +394,29 @@ app.post('/api/opportunities/launch', authenticateDualAuth, async (req: Authenti
 
     const authResult = await gamesCatalogService.authorizeGameLaunch(userId, gameId, opportunityId);
     if (!authResult.authorized) {
-      return res.status(403).json(authResult);
+      const isOwnerMismatch = Boolean(authResult.error && authResult.error.includes('belongs to another gamer'));
+      return res.status(isOwnerMismatch ? 403 : 400).json({
+        ...authResult,
+        success: false,
+        code: isOwnerMismatch ? 'FORBIDDEN_RESOURCE_OWNER' : 'LAUNCH_DENIED',
+        error: isOwnerMismatch ? 'Forbidden: You do not own this match opportunity.' : authResult.error,
+      });
     }
     res.json(authResult);
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message || 'Failed to launch opportunity' });
+    if (err instanceof UnauthorizedOpportunityActionError || (err.message && err.message.includes('belongs to another gamer'))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: You do not own this match opportunity.',
+        code: 'FORBIDDEN_RESOURCE_OWNER',
+      });
+    }
+    res.status(500).json({ success: false, error: 'Failed to launch opportunity' });
   }
 });
 
 // Cancel / Refund Match Opportunity before launch (Restores ₦100)
-app.post('/api/opportunities/refund', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/refund', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { opportunityId, reason } = req.body;
@@ -422,6 +436,13 @@ app.post('/api/opportunities/refund', authenticateDualAuth, async (req: Authenti
         : 'Match opportunity cancelled before launch. ₦100 refunded to wallet.',
     });
   } catch (err: any) {
+    if (err instanceof UnauthorizedOpportunityActionError || (err.message && err.message.includes('belongs to another gamer'))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: You do not own this match opportunity.',
+        code: 'FORBIDDEN_RESOURCE_OWNER',
+      });
+    }
     if (err instanceof InvalidTransitionError) {
       return res.status(400).json({
         success: false,
@@ -429,12 +450,19 @@ app.post('/api/opportunities/refund', authenticateDualAuth, async (req: Authenti
         code: 'INVALID_TRANSITION',
       });
     }
-    res.status(500).json({ success: false, error: err.message });
+    if (err.message && err.message.includes('not found')) {
+      return res.status(404).json({
+        success: false,
+        error: 'Match opportunity not found.',
+        code: 'OPPORTUNITY_NOT_FOUND',
+      });
+    }
+    res.status(500).json({ success: false, error: 'Failed to refund opportunity.' });
   }
 });
 
 // Complete Match Opportunity (Conclude match after play)
-app.post('/api/opportunities/complete', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/opportunities/complete', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { opportunityId } = req.body;
@@ -449,6 +477,13 @@ app.post('/api/opportunities/complete', authenticateDualAuth, async (req: Authen
       message: `Match concluded. Opportunity '${opportunity.id}' marked completed.`,
     });
   } catch (err: any) {
+    if (err instanceof UnauthorizedOpportunityActionError || (err.message && err.message.includes('belongs to another gamer'))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: You do not own this match opportunity.',
+        code: 'FORBIDDEN_RESOURCE_OWNER',
+      });
+    }
     if (err instanceof InvalidTransitionError) {
       return res.status(400).json({
         success: false,
@@ -456,13 +491,20 @@ app.post('/api/opportunities/complete', authenticateDualAuth, async (req: Authen
         code: 'INVALID_TRANSITION',
       });
     }
-    res.status(500).json({ success: false, error: err.message });
+    if (err.message && err.message.includes('not found')) {
+      return res.status(404).json({
+        success: false,
+        error: 'Match opportunity not found.',
+        code: 'OPPORTUNITY_NOT_FOUND',
+      });
+    }
+    res.status(500).json({ success: false, error: 'Failed to complete opportunity.' });
   }
 });
 
 // --- LEGACY SESSIONS (Permanently Retired in Stage 3 - Disabled for Safety) ---
 // Session: Start ₦100 1-Hour Session (Disabled: Cannot deduct funds or start sessions)
-app.post('/api/sessions/start', authenticateDualAuth, legacySessionStartHandler);
+app.post('/api/sessions/start', authenticateDualAuthStrict, legacySessionStartHandler);
 
 // Session: Get Active Session with Live Countdown (Protected)
 app.get('/api/sessions/active', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -476,7 +518,7 @@ app.get('/api/sessions/active', authenticateDualAuth, async (req: AuthenticatedR
 });
 
 // Session: End Session Early (Protected)
-app.post('/api/sessions/end', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/sessions/end', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { sessionId } = req.body;
@@ -519,7 +561,7 @@ app.get('/api/games', async (req: Request, res: Response) => {
 });
 
 // Add custom game entry (Protected)
-app.post('/api/games/custom', authenticateDualAuth, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/games/custom', authenticateDualAuthStrict, (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { name, packageId, category, description, iconUrl, bannerUrl } = req.body;
@@ -540,7 +582,7 @@ app.post('/api/games/custom', authenticateDualAuth, (req: AuthenticatedRequest, 
 });
 
 // Launch game with shared session authorization (Protected)
-app.post('/api/games/launch', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/games/launch', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { gameId, opportunityId } = req.body;
@@ -587,7 +629,7 @@ app.get('/api/runtime-info', (_req: Request, res: Response) => {
 // ==========================================
 
 // Create Room (Protected)
-app.post('/api/rooms', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -701,7 +743,7 @@ app.get('/api/rooms/:roomId', async (req: Request, res: Response) => {
 });
 
 // Reset Room PIN (Host Only)
-app.post('/api/rooms/:roomId/pin/reset', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/pin/reset', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -732,7 +774,7 @@ app.post('/api/rooms/:roomId/pin/reset', authenticateDualAuth, async (req: Authe
 });
 
 // Join Room (Protected) - Universal Capacity & Scrypt PIN Verification
-app.post('/api/rooms/:roomId/join', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/join', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -766,7 +808,7 @@ app.post('/api/rooms/:roomId/join', authenticateDualAuth, async (req: Authentica
 });
 
 // Create Room Invitation (Host Only)
-app.post('/api/rooms/:roomId/invitations', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/invitations', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -794,7 +836,7 @@ app.post('/api/rooms/:roomId/invitations', authenticateDualAuth, async (req: Aut
 });
 
 // List Room Invitations (Host Only)
-app.get('/api/rooms/:roomId/invitations', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/rooms/:roomId/invitations', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -813,7 +855,7 @@ app.get('/api/rooms/:roomId/invitations', authenticateDualAuth, async (req: Auth
 });
 
 // Revoke Room Invitation (Host Only)
-app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId, invitationId } = req.params;
@@ -835,7 +877,7 @@ app.post('/api/rooms/:roomId/invitations/:invitationId/revoke', authenticateDual
 });
 
 // Redeem Invitation Atomically (Protected)
-app.post('/api/rooms/:roomId/invitations/redeem', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/invitations/redeem', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
@@ -884,7 +926,7 @@ app.post('/api/rooms/:roomId/invitations/redeem', authenticateDualAuth, async (r
 });
 
 // Leave Room (Protected)
-app.post('/api/rooms/:roomId/leave', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/leave', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -899,7 +941,7 @@ app.post('/api/rooms/:roomId/leave', authenticateDualAuth, async (req: Authentic
 });
 
 // Close Room (Protected, Host Only)
-app.post('/api/rooms/:roomId/close', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/close', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -917,7 +959,7 @@ app.post('/api/rooms/:roomId/close', authenticateDualAuth, async (req: Authentic
 });
 
 // Update Room Status (Protected, Host Only)
-app.post('/api/rooms/:roomId/status', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/status', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -939,7 +981,7 @@ app.post('/api/rooms/:roomId/status', authenticateDualAuth, async (req: Authenti
 });
 
 // Update Broadcast Status & Stream URL (Protected, Host Only)
-app.post('/api/rooms/:roomId/broadcast', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/broadcast', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -973,7 +1015,7 @@ app.post('/api/rooms/:roomId/broadcast', authenticateDualAuth, async (req: Authe
 });
 
 // Viewer Presence Heartbeat (Protected, Authenticated Viewer)
-app.post('/api/rooms/:roomId/viewers/heartbeat', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/viewers/heartbeat', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -998,7 +1040,7 @@ app.post('/api/rooms/:roomId/viewers/heartbeat', authenticateDualAuth, async (re
 });
 
 // Viewer Departure / Disconnect (Protected, Authenticated Viewer)
-app.post('/api/rooms/:roomId/viewers/leave', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/viewers/leave', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -1018,7 +1060,7 @@ app.post('/api/rooms/:roomId/viewers/leave', authenticateDualAuth, async (req: A
 });
 
 // LiveKit WebRTC Access Token (Protected, Scoped strictly by host vs viewer role)
-app.post('/api/rooms/:roomId/livekit-token', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/livekit-token', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const { roomId } = req.params;
@@ -1087,7 +1129,7 @@ app.post('/api/rooms/:roomId/livekit-token', authenticateDualAuth, async (req: A
 
 
 // Send Chat Message (Protected, Room Participant Only)
-app.post('/api/rooms/:roomId/messages', authenticateDualAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/rooms/:roomId/messages', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
     const userProfile = await firestoreRepo.getUser(userId);
