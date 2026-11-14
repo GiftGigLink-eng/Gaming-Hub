@@ -14,17 +14,18 @@ import {
   KeyRound,
   UserPlus,
   LogIn,
+  Link2,
 } from 'lucide-react';
 import { UserProfile } from '../types.js';
 import { auth } from '../lib/firebase.js';
+import { authManager } from '../lib/authManager.js';
 import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
   GoogleAuthProvider,
   signInWithPopup,
   signInWithCredential,
+  signInWithEmailAndPassword,
 } from 'firebase/auth';
 import { validateEmail, validatePassword, getAuthErrorMessage } from '../lib/authValidation.js';
 
@@ -35,7 +36,7 @@ interface PhoneAuthModalProps {
   onLoginSuccess: (user: UserProfile) => void;
 }
 
-type AuthMode = 'signin' | 'register' | 'forgot_password';
+type AuthMode = 'signin' | 'register' | 'forgot_password' | 'link_account';
 
 export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
   isOpen,
@@ -48,6 +49,9 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
+  // Account-linking state: holds temporary Firebase ID token when linking is required
+  const [firebaseIdTokenForLinking, setFirebaseIdTokenForLinking] = useState<string | null>(null);
+  const [firebasePasswordForVerify, setFirebasePasswordForVerify] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -136,6 +140,8 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     setPassword('');
     setConfirmPassword('');
     setDisplayName('');
+    setFirebaseIdTokenForLinking(null);
+    setFirebasePasswordForVerify('');
     setError(null);
     setSuccessMsg(null);
   };
@@ -146,7 +152,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     setSuccessMsg(null);
   };
 
-  // Primary: Email/Password Registration
+  // Primary: Gaming Hub Independent Registration (Stage 3.3)
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isLoading) return;
@@ -174,24 +180,37 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     setIsLoading(true);
 
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      const firebaseUser = userCredential.user;
-      const token = await firebaseUser.getIdToken();
-
-      // Synchronize with server to create Firestore player profile and wallet
-      const res = await fetch('/api/auth/user', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+      const regResult = await authManager.register({
+        email: email.trim(),
+        password,
+        displayName: displayName.trim() || undefined,
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to initialize player profile.');
+      if (!regResult.success) {
+        if (regResult.code === 'FIREBASE_ACCOUNT_EXISTS_LINKING_REQUIRED') {
+          // Existing Firebase account detected: prompt linking flow with ownership verification
+          setAuthMode('link_account');
+          setError(
+            'An existing Gaming Hub player account was found with this email. Please verify your existing password to link independent credentials without losing your identity or wallet balance.'
+          );
+          return;
+        }
+        throw new Error(regResult.error || 'Registration failed.');
       }
 
-      setSuccessMsg(`Account created! Welcome, ${displayName || data.user.displayName || 'Player'}!`);
-      onLoginSuccess(data.user);
+      // Fetch user profile and wallet to synchronize state
+      const res = await authManager.fetch('/api/auth/user');
+      const data = await res.json();
+      const finalUser: UserProfile = data.user || {
+        id: regResult.user!.id,
+        displayName: regResult.user!.displayName || displayName || 'Player',
+        phoneNumber: '',
+        role: regResult.user!.role || 'user',
+        createdAt: regResult.user!.createdAt || new Date().toISOString(),
+      };
+
+      setSuccessMsg(`Account created! Welcome, ${finalUser.displayName}!`);
+      onLoginSuccess(finalUser);
       setTimeout(() => {
         onClose();
         resetForm();
@@ -203,7 +222,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     }
   };
 
-  // Primary: Email/Password Sign-In
+  // Primary: Gaming Hub Independent Sign-In (Stage 3.3)
   const handleEmailSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isLoading) return;
@@ -225,24 +244,148 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     setIsLoading(true);
 
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
-      const firebaseUser = userCredential.user;
-      const token = await firebaseUser.getIdToken();
-
-      // Retrieve synchronized player profile & wallet
-      const res = await fetch('/api/auth/user', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+      // 1. Attempt login with Gaming Hub independent credentials
+      const loginResult = await authManager.login({
+        email: email.trim(),
+        password,
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to retrieve player session.');
+      if (loginResult.success) {
+        // Fetch synchronized profile & wallet via authManager
+        const res = await authManager.fetch('/api/auth/user');
+        const data = await res.json();
+        const profile: UserProfile = data.user || {
+          id: loginResult.user!.id,
+          displayName: loginResult.user!.displayName || 'Player',
+          phoneNumber: '',
+          role: loginResult.user!.role || 'user',
+          createdAt: loginResult.user!.createdAt || new Date().toISOString(),
+        };
+
+        setSuccessMsg(`Welcome back, ${profile.displayName}!`);
+        onLoginSuccess(profile);
+        setTimeout(() => {
+          onClose();
+          resetForm();
+        }, 700);
+        return;
       }
 
-      setSuccessMsg(`Welcome back, ${data.user.displayName || firebaseUser.email || 'Player'}!`);
-      onLoginSuccess(data.user);
+      // 2. If independent login failed with INVALID_CREDENTIALS, check if this is an unmigrated Firebase account
+      if (loginResult.code === 'INVALID_CREDENTIALS') {
+        try {
+          // Attempt Firebase login to detect if existing member hasn't set up independent credentials yet
+          const fbCred = await signInWithEmailAndPassword(auth, email.trim(), password);
+          const fbToken = await fbCred.user.getIdToken();
+
+          if (fbToken) {
+            // Unmigrated Firebase user authenticated! Automatically link credentials to preserve UID & wallet
+            const linkResult = await authManager.linkCredentials({
+              firebaseIdToken: fbToken,
+              password,
+              email: email.trim(),
+              displayName: fbCred.user.displayName || displayName || undefined,
+            });
+
+            if (linkResult.success) {
+              const res = await authManager.fetch('/api/auth/user');
+              const data = await res.json();
+              const profile: UserProfile = data.user || {
+                id: fbCred.user.uid,
+                displayName: fbCred.user.displayName || 'Player',
+                phoneNumber: '',
+                role: 'user',
+                createdAt: new Date().toISOString(),
+              };
+
+              setSuccessMsg(`Welcome back, ${profile.displayName}! Account upgraded to Gaming Hub credentials.`);
+              onLoginSuccess(profile);
+              setTimeout(() => {
+                onClose();
+                resetForm();
+              }, 700);
+              return;
+            }
+          }
+        } catch (fbErr: any) {
+          // Firebase login also failed: show standard invalid credentials error
+        }
+      }
+
+      throw new Error(loginResult.error || 'Incorrect email or password.');
+    } catch (err: any) {
+      setError(getAuthErrorMessage(err));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Account Linking: Link existing Firebase account to independent credentials (Stage 3.3)
+  const handleLinkExistingAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isLoading) return;
+
+    setError(null);
+    setSuccessMsg(null);
+
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      setError(emailCheck.error!);
+      return;
+    }
+
+    if (!firebasePasswordForVerify) {
+      setError('Please enter your existing password to verify account ownership.');
+      return;
+    }
+
+    const passwordCheck = validatePassword(password);
+    if (!passwordCheck.valid) {
+      setError(passwordCheck.error!);
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('New passwords do not match. Please re-enter.');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      // 1. Verify ownership by authenticating with Firebase
+      const fbCred = await signInWithEmailAndPassword(auth, email.trim(), firebasePasswordForVerify);
+      const fbToken = await fbCred.user.getIdToken();
+
+      if (!fbToken) {
+        throw new Error('Could not retrieve verified token from Firebase account.');
+      }
+
+      // 2. Link independent credentials with cryptographic proof of ownership
+      const linkResult = await authManager.linkCredentials({
+        firebaseIdToken: fbToken,
+        password,
+        email: email.trim(),
+        displayName: fbCred.user.displayName || displayName || undefined,
+      });
+
+      if (!linkResult.success) {
+        throw new Error(linkResult.error || 'Account linking failed.');
+      }
+
+      // 3. Fetch synchronized profile & wallet
+      const res = await authManager.fetch('/api/auth/user');
+      const data = await res.json();
+      const profile: UserProfile = data.user || {
+        id: fbCred.user.uid,
+        displayName: fbCred.user.displayName || 'Player',
+        phoneNumber: '',
+        role: 'user',
+        createdAt: new Date().toISOString(),
+      };
+
+      setSuccessMsg(`Credentials linked! Welcome, ${profile.displayName}! Your wallet and identity are preserved.`);
+      onLoginSuccess(profile);
       setTimeout(() => {
         onClose();
         resetForm();
@@ -341,7 +484,11 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
     setError(null);
     setSuccessMsg(null);
     try {
-      await signOut(auth);
+      // 1. Independent session logout
+      await authManager.logout();
+      // 2. Clear Firebase Auth session if active
+      await signOut(auth).catch(() => {});
+
       setSuccessMsg('Signed out successfully.');
       setTimeout(() => {
         onClose();
@@ -482,6 +629,15 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
               >
                 Register
               </button>
+              {authMode === 'link_account' && (
+                <button
+                  type="button"
+                  onClick={() => handleModeChange('link_account')}
+                  className="flex-1 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer bg-emerald-500 text-zinc-950 shadow-md font-extrabold"
+                >
+                  Link
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => handleModeChange('forgot_password')}
@@ -695,6 +851,112 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                     className="text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer"
                   >
                     Back to Sign In
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Account Linking Form (Stage 3.3 Existing Firebase Account Migration) */}
+            {authMode === 'link_account' && (
+              <form onSubmit={handleLinkExistingAccount} className="space-y-3">
+                <div className="p-3.5 rounded-2xl bg-amber-950/40 border border-amber-800/60 text-xs text-amber-300 leading-relaxed space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-200">
+                    <Link2 className="w-4 h-4 text-amber-400" />
+                    <span>Existing Account Upgrade</span>
+                  </div>
+                  <p className="text-[11px] text-amber-300/90 leading-normal">
+                    An existing Gaming Hub player profile exists for this email. Verify your current password to link independent credentials. Your gamer ID, wallet balance, and match passes will remain completely intact.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Account Email</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="player@gaminghub.ng"
+                    required
+                    autoComplete="email"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Existing Password (Ownership Verification)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={firebasePasswordForVerify}
+                    onChange={(e) => setFirebasePasswordForVerify(e.target.value)}
+                    placeholder="Enter existing password to verify ownership"
+                    required
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-amber-500/30 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-amber-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>New Independent Password (min. 6 chars)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Choose your new Gaming Hub password"
+                    required
+                    minLength={6}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Confirm New Password</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm your new password"
+                    required
+                    minLength={6}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer mt-2"
+                >
+                  {isLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Verifying & Linking Credentials...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Link2 className="w-4 h-4" />
+                      <span>Link & Upgrade Account</span>
+                    </>
+                  )}
+                </button>
+
+                <div className="text-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange('signin')}
+                    className="text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    Cancel and Back to Sign In
                   </button>
                 </div>
               </form>

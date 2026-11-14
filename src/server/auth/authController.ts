@@ -92,9 +92,12 @@ export async function handleRegister(req: Request, res: Response) {
       });
     }
 
-    // 1. Check if independent credentials already exist for this email
-    const existingCred = await authRepo.getCredentialByEmail(normalizedEmail);
-    if (existingCred) {
+    // 1. Check if independent credentials or deterministic email index already exist for this email
+    const [existingCred, existingEmailIndex] = await Promise.all([
+      authRepo.getCredentialByEmail(normalizedEmail),
+      authRepo.getEmailIndex(normalizedEmail),
+    ]);
+    if (existingCred || existingEmailIndex) {
       return res.status(409).json({
         success: false,
         error: 'An account with this email address already exists. Please sign in instead.',
@@ -131,21 +134,35 @@ export async function handleRegister(req: Request, res: Response) {
       updatedAt: nowIso,
     };
 
-    await authRepo.createCredential(newCredential);
-
-    // Ensure user profile & wallet exist for new user
     const finalDisplayName = (displayName && typeof displayName === 'string' && displayName.trim().length >= 2)
       ? displayName.trim()
       : normalizedEmail.split('@')[0];
 
-    const userProfile = await authRepo.ensureUserProfile({
-      id: userId,
-      email: normalizedEmail,
-      phoneNumber: '',
-      displayName: finalDisplayName,
-      role: 'user',
-      createdAt: nowIso,
-    });
+    let userProfile;
+    try {
+      const regResult = await authRepo.registerMemberAtomic({
+        credential: newCredential,
+        profile: {
+          id: userId,
+          email: normalizedEmail,
+          phoneNumber: '',
+          displayName: finalDisplayName,
+          role: 'user',
+          createdAt: nowIso,
+        },
+        initialBalance: 0,
+      });
+      userProfile = regResult.user;
+    } catch (atomicErr: any) {
+      if (atomicErr.code === 'EMAIL_ALREADY_IN_USE' || atomicErr.code === 'CREDENTIALS_ALREADY_LINKED') {
+        return res.status(409).json({
+          success: false,
+          error: 'An account with this email already exists.',
+          code: 'EMAIL_ALREADY_IN_USE',
+        });
+      }
+      throw atomicErr;
+    }
 
 
     // Create session and issue tokens
@@ -297,29 +314,139 @@ export async function handleLinkCredentials(req: Request, res: Response) {
       });
     }
 
+    const clientIp = authRateLimiter.getClientIp(req);
+    const nowIso = new Date().toISOString();
+
+    // Enforce failed-attempt throttling for account-linking recovery using existing (email, ip) limits
+    const attemptCheck = authRateLimiter.checkFailedLoginAllowed(normalizedTokenEmail, clientIp);
+    if (!attemptCheck.allowed) {
+      res.setHeader('Retry-After', attemptCheck.retryAfterSeconds.toString());
+      return res.status(429).json({
+        success: false,
+        error: `Too many failed verification attempts. Please wait ${attemptCheck.retryAfterSeconds} seconds before trying again.`,
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfter: attemptCheck.retryAfterSeconds,
+      });
+    }
+
     // Check if credentials are already linked to this UID
     const existingCredByUid = await authRepo.getCredentialByUserId(tokenUid);
     if (existingCredByUid) {
+      // Check if credentials belong to this exact verified member and normalized email
+      if (existingCredByUid.email.trim().toLowerCase() === normalizedTokenEmail) {
+        // Safe Account-Linking Recovery:
+        // The legitimate owner has verified ownership via their Firebase ID token
+        // and provides the matching password for their linked credentials.
+        const passwordMatches = await verifyPassword(existingCredByUid.passwordHash, password);
+        if (passwordMatches) {
+          // Clear failed attempt tracking only upon successful password verification
+          authRateLimiter.resetFailedLogin(normalizedTokenEmail, clientIp);
+
+          // Safely backfill deterministic email index for pre-index legacy credentials
+          await authRepo.ensureEmailIndex(tokenUid, normalizedTokenEmail, existingCredByUid.createdAt);
+
+          let userProfile = await authRepo.getUserProfile(tokenUid);
+          if (!userProfile) {
+            userProfile = await authRepo.ensureUserProfile({
+              id: tokenUid,
+              email: normalizedTokenEmail,
+              phoneNumber: authenticatedFirebaseUser.phoneNumber || '',
+              displayName: req.body?.displayName?.trim() || normalizedTokenEmail.split('@')[0],
+              role: 'user',
+              createdAt: existingCredByUid.createdAt,
+            });
+          }
+
+          const sessionId = generateSessionId();
+          const familyId = generateFamilyId();
+          const rawRefreshToken = generateRawRefreshToken();
+          const refreshTokenHash = hashRefreshToken(rawRefreshToken);
+          const userAgent = req.headers['user-agent'] || 'unknown';
+
+          const session: AuthSession = {
+            sessionId,
+            userId: tokenUid,
+            familyId,
+            refreshTokenHash,
+            previousRefreshTokenHash: null,
+            consumedTokenHashes: [],
+            isRevoked: false,
+            revokedReason: null,
+            expiresAt: Date.now() + REFRESH_TOKEN_EXPIRATION_MS,
+            createdAt: nowIso,
+            lastRotatedAt: nowIso,
+            userAgent,
+            ip: clientIp,
+          };
+
+          await authRepo.createSession(session);
+
+          const accessToken = generateAccessToken({
+            sub: tokenUid,
+            uid: tokenUid,
+            email: normalizedTokenEmail,
+            sessionId,
+            role: userProfile.role || 'user',
+          });
+
+          return res.status(200).json({
+            success: true,
+            recovered: true,
+            message: 'Account credentials already linked. Authenticated session established.',
+            user: {
+              id: tokenUid,
+              email: normalizedTokenEmail,
+              displayName: userProfile.displayName,
+              role: userProfile.role,
+              createdAt: userProfile.createdAt,
+            },
+            tokens: {
+              accessToken,
+              refreshToken: rawRefreshToken,
+              expiresIn: ACCESS_TOKEN_EXPIRATION_SECONDS,
+              tokenType: 'Bearer',
+            },
+          });
+        }
+
+        // Failed recovery password verification: record against (email, ip) rate limiter
+        const recordResult = authRateLimiter.recordFailedLogin(normalizedTokenEmail, clientIp);
+        if (!recordResult.allowed) {
+          res.setHeader('Retry-After', recordResult.retryAfterSeconds.toString());
+          return res.status(429).json({
+            success: false,
+            error: `Too many failed verification attempts. Please wait ${recordResult.retryAfterSeconds} seconds before trying again.`,
+            code: 'RATE_LIMIT_EXCEEDED',
+            retryAfter: recordResult.retryAfterSeconds,
+          });
+        }
+      }
+
       return res.status(409).json({
         success: false,
-        error: 'Independent credentials are already linked to this account.',
+        error: 'Unable to link or verify independent credentials for this account.',
         code: 'CREDENTIALS_ALREADY_LINKED',
       });
     }
 
-    // Check if credentials already exist for this email
-    const existingCredByEmail = await authRepo.getCredentialByEmail(normalizedTokenEmail);
-    if (existingCredByEmail) {
+    // Pre-check email index and legacy credentials without revealing ownership to caller
+    const [existingCredByEmail, existingEmailIndex] = await Promise.all([
+      authRepo.getCredentialByEmail(normalizedTokenEmail),
+      authRepo.getEmailIndex(normalizedTokenEmail),
+    ]);
+    if (
+      (existingCredByEmail && existingCredByEmail.userId !== tokenUid) ||
+      (existingEmailIndex && existingEmailIndex.userId !== tokenUid)
+    ) {
       return res.status(409).json({
         success: false,
-        error: 'Credentials for this email address already exist.',
-        code: 'EMAIL_ALREADY_LINKED',
+        error: 'Unable to link or verify independent credentials for this account.',
+        code: 'CREDENTIALS_ALREADY_LINKED',
       });
     }
 
     // Hash password with Argon2id
     const passwordHash = await hashPassword(password);
-    const nowIso = new Date().toISOString();
 
     const credential: AuthCredential = {
       userId: tokenUid,
@@ -331,15 +458,15 @@ export async function handleLinkCredentials(req: Request, res: Response) {
       updatedAt: nowIso,
     };
 
-    // Atomic transaction: prevents concurrent linking requests from overwriting an existing credential
+    // Atomic transaction: creates credential and deterministic email index together
     try {
       await authRepo.createCredentialAtomic(credential);
     } catch (atomicErr: any) {
       if (atomicErr.code === 'CREDENTIALS_ALREADY_LINKED' || atomicErr.code === 'EMAIL_ALREADY_LINKED') {
         return res.status(409).json({
           success: false,
-          error: atomicErr.message || 'Credentials already linked.',
-          code: atomicErr.code,
+          error: 'Unable to link or verify independent credentials for this account.',
+          code: 'CREDENTIALS_ALREADY_LINKED',
         });
       }
       throw atomicErr;
@@ -359,12 +486,11 @@ export async function handleLinkCredentials(req: Request, res: Response) {
       });
     }
 
-    // Create session and issue tokens
+    // Create session and issue tokens (reuse clientIp captured above)
     const sessionId = generateSessionId();
     const familyId = generateFamilyId();
     const rawRefreshToken = generateRawRefreshToken();
     const refreshTokenHash = hashRefreshToken(rawRefreshToken);
-    const clientIp = authRateLimiter.getClientIp(req);
     const userAgent = req.headers['user-agent'] || 'unknown';
 
     const session: AuthSession = {
@@ -493,6 +619,11 @@ export async function handleLogin(req: Request, res: Response) {
     // Successful login: reset failed attempts for this (email, ip) pair
     authRateLimiter.resetFailedLogin(normalizedEmail, clientIp);
 
+    // Safely lazy-backfill deterministic email index for legacy pre-index credentials
+    authRepo
+      .ensureEmailIndex(cred.userId, cred.email, cred.createdAt)
+      .catch((e) => console.warn('[AuthController] Lazy email index backfill error:', e.message));
+
     // Check if Argon2 hash needs rehash due to upgraded parameters
     if (needsRehash(cred.passwordHash)) {
       hashPassword(password)
@@ -529,10 +660,12 @@ export async function handleLogin(req: Request, res: Response) {
 
     await authRepo.createSession(session);
 
+    const normalizedCredEmail = cred.email.trim().toLowerCase();
+
     const accessToken = generateAccessToken({
       sub: cred.userId,
       uid: cred.userId,
-      email: cred.email,
+      email: normalizedCredEmail,
       sessionId,
       role: userProfile?.role || 'user',
     });
@@ -541,8 +674,8 @@ export async function handleLogin(req: Request, res: Response) {
       success: true,
       user: {
         id: cred.userId,
-        email: cred.email,
-        displayName: userProfile?.displayName || cred.email.split('@')[0],
+        email: normalizedCredEmail,
+        displayName: userProfile?.displayName || normalizedCredEmail.split('@')[0],
         role: userProfile?.role || 'user',
         createdAt: userProfile?.createdAt || cred.createdAt,
       },
@@ -724,6 +857,13 @@ export async function handleRefresh(req: Request, res: Response) {
 
       return res.json({
         success: true,
+        user: userProfile ? {
+          id: userProfile.id,
+          email: cred?.email || (userProfile as any)?.email || '',
+          displayName: userProfile.displayName,
+          role: userProfile.role,
+          createdAt: userProfile.createdAt,
+        } : null,
         tokens: {
           accessToken,
           refreshToken: newRawRefreshToken,

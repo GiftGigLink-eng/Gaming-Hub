@@ -384,6 +384,106 @@ async function runEmulatorSuite() {
       assert.strictEqual(docData.revokedReason, 'replay_attack_detected', 'Firestore session must record revokedReason');
     });
 
+    // Scenario 7: Deterministic auth_email_index/{emailKey} prevents concurrent different-UID registration race
+    await test('7. Deterministic auth_email_index prevents concurrent duplicate registration across UIDs', async (db) => {
+      const email = `RaceEmu_${crypto.randomUUID()}@GamingHub.ng`;
+      const normalized = email.trim().toLowerCase();
+      const emailKey = AuthRepository.computeEmailKey(normalized);
+      const pwdHash = await hashPassword('StrongPassword2026!');
+      const nowIso = new Date().toISOString();
+      const uid1 = `gh_emu_1_${crypto.randomUUID()}`;
+      const uid2 = `gh_emu_2_${crypto.randomUUID()}`;
+
+      const results = await Promise.allSettled([
+        repo.registerMemberAtomic({
+          credential: {
+            userId: uid1,
+            email,
+            passwordHash: pwdHash,
+            failedLoginAttempts: 0,
+            lockUntil: null,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          },
+          profile: { id: uid1, phoneNumber: '', displayName: 'EmuRace1', role: 'user', createdAt: nowIso },
+          initialBalance: 0,
+        }),
+        repo.registerMemberAtomic({
+          credential: {
+            userId: uid2,
+            email: normalized,
+            passwordHash: pwdHash,
+            failedLoginAttempts: 0,
+            lockUntil: null,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          },
+          profile: { id: uid2, phoneNumber: '', displayName: 'EmuRace2', role: 'user', createdAt: nowIso },
+          initialBalance: 0,
+        }),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+      assert.strictEqual(fulfilled.length, 1, 'Exactly one registration must commit in Firestore');
+      assert.strictEqual(rejected.length, 1, 'Second registration must reject in Firestore');
+
+      const indexDoc = await db.collection('auth_email_index').doc(emailKey).get();
+      assert(indexDoc.exists, 'Deterministic auth_email_index doc must exist in Firestore');
+      const winnerUid = indexDoc.data()!.userId;
+      const loserUid = winnerUid === uid1 ? uid2 : uid1;
+      assert.strictEqual((await db.collection('auth_credentials').doc(loserUid).get()).exists, false);
+      assert.strictEqual((await db.collection('users').doc(loserUid).get()).exists, false);
+      assert.strictEqual((await db.collection('wallets').doc(loserUid).get()).exists, false);
+    });
+
+    // Scenario 8: Pre-index legacy credential rejection & safe lazy backfill in Firestore
+    await test('8. Legacy pre-index credential protection and lazy index backfill in Firestore', async (db) => {
+      const legacyUid = `fb_emu_legacy_${crypto.randomUUID()}`;
+      const legacyEmail = `legacy_emu_${crypto.randomUUID()}@gaminghub.ng`;
+      const emailKey = AuthRepository.computeEmailKey(legacyEmail);
+      const pwdHash = await hashPassword('StrongPassword2026!');
+      const nowIso = new Date().toISOString();
+
+      // Seed legacy credential WITHOUT creating auth_email_index
+      await repo.seedLegacyCredentialForTest(
+        {
+          userId: legacyUid,
+          email: legacyEmail,
+          passwordHash: pwdHash,
+          failedLoginAttempts: 0,
+          lockUntil: null,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        },
+        { skipIndex: true }
+      );
+      assert.strictEqual((await db.collection('auth_email_index').doc(emailKey).get()).exists, false);
+
+      // Different UID cannot claim the email even when index is absent
+      await assert.rejects(
+        async () => {
+          await repo.createCredentialAtomic({
+            userId: `gh_attacker_${crypto.randomUUID()}`,
+            email: legacyEmail,
+            passwordHash: pwdHash,
+            failedLoginAttempts: 0,
+            lockUntil: null,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+        },
+        (err: any) => err.code === 'EMAIL_ALREADY_LINKED'
+      );
+
+      // Lazy backfill creates index for legacyUid without overwriting
+      const backfillStatus = await repo.ensureEmailIndex(legacyUid, legacyEmail, nowIso);
+      assert.strictEqual(backfillStatus, 'created');
+      const indexSnap = await db.collection('auth_email_index').doc(emailKey).get();
+      assert(indexSnap.exists);
+      assert.strictEqual(indexSnap.data()!.userId, legacyUid);
+    });
+
     console.log(`\n🎉 All ${testsPassed}/${totalTests} Firestore Emulator Integration tests PASSED!`);
   } finally {
     // Guaranteed clean-up even if tests fail or throw

@@ -105,13 +105,27 @@ export function createFirebaseAdminApp(options?: FirebaseAdminInitOptions): App 
   }
 }
 
-// Initialize Firebase Admin SDK safely
-let adminApp: App;
-const existingApps = getApps();
-if (existingApps.length === 0) {
+// Initialize Firebase Admin SDK safely:
+// - In production, initialize eagerly at startup so missing/invalid credentials fail fast.
+// - In non-production (e.g. isolated emulator or unit tests), initialize lazily via getAdminApp()
+//   so importing AuthRepository for demo-* emulator tests does not instantiate the production project app.
+let adminApp: App | undefined;
+
+export function getAdminApp(): App {
+  const existingApps = getApps();
+  if (adminApp && existingApps.includes(adminApp)) {
+    return adminApp;
+  }
+  if (existingApps.length > 0) {
+    adminApp = existingApps[0]!;
+    return adminApp;
+  }
   adminApp = createFirebaseAdminApp();
-} else {
-  adminApp = existingApps[0]!;
+  return adminApp;
+}
+
+if (process.env.NODE_ENV === 'production') {
+  adminApp = getAdminApp();
 }
 
 export { adminApp };
@@ -157,7 +171,7 @@ export async function verifyFirebaseIdToken(token: string, checkRevocation = fal
   }
 
   // Real Firebase Admin SDK verification
-  const auth = getAuth(adminApp);
+  const auth = getAuth(getAdminApp());
   const decoded: DecodedIdToken = await auth.verifyIdToken(token, checkRevocation);
   return {
     uid: decoded.uid,

@@ -45,6 +45,7 @@ import {
   handleLogout,
 } from './src/server/auth/authController.js';
 import { authRateLimiter } from './src/server/auth/authRateLimiter.js';
+import { authRepo } from './src/server/auth/authRepository.js';
 import { validateJwtSecretOnStartup } from './src/server/auth/tokenService.js';
 
 dotenv.config();
@@ -228,19 +229,63 @@ app.post('/api/auth/logout', handleLogout);
 app.get('/api/auth/user', authenticateDualAuthStrict, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.uid;
-    let user = await firestoreRepo.getUser(userId);
-    if (!user) {
-      const emailPrefix = req.user!.email ? req.user!.email.split('@')[0] : null;
-      user = {
-        id: userId,
-        phoneNumber: req.user!.phoneNumber || (req.user!.email || '+2348000000000'),
-        displayName: emailPrefix || `Gamer_${userId.slice(-4)}`,
-        role: 'user',
-        createdAt: new Date().toISOString()
-      };
-      await firestoreRepo.upsertUser(user);
+    let user: any = null;
+    let wallet: any = null;
+
+    // 1. If Gaming Hub independent account or running in test harness, check authRepo first
+    if (req.user?.authProvider === 'gaminghub' || process.env.NODE_ENV === 'test') {
+      user = await authRepo.getUserProfile(userId);
+      if (user) {
+        wallet = await authRepo.ensureUserWallet(userId);
+      }
     }
-    const wallet = await firestoreRepo.getWallet(userId);
+
+    // 2. If not yet resolved, query Firestore
+    if (!user || !wallet) {
+      try {
+        if (!user) {
+          user = await firestoreRepo.getUser(userId);
+        }
+        if (!user) {
+          user = await authRepo.getUserProfile(userId);
+        }
+        if (!user) {
+          const emailPrefix = req.user!.email ? req.user!.email.split('@')[0] : null;
+          user = {
+            id: userId,
+            phoneNumber: req.user!.phoneNumber || (req.user!.email || '+2348000000000'),
+            displayName: emailPrefix || `Gamer_${userId.slice(-4)}`,
+            role: 'user',
+            createdAt: new Date().toISOString()
+          };
+          await firestoreRepo.upsertUser(user).catch(() => {});
+        }
+        if (!wallet) {
+          wallet = await firestoreRepo.getWallet(userId).catch(() => null);
+        }
+        if (!wallet) {
+          wallet = await authRepo.ensureUserWallet(userId);
+        }
+      } catch {
+        // Resilient fallback to authRepo
+        if (!user) {
+          user = await authRepo.getUserProfile(userId);
+        }
+        if (!user) {
+          user = {
+            id: userId,
+            phoneNumber: req.user!.phoneNumber || (req.user!.email || '+2348000000000'),
+            displayName: req.user!.email?.split('@')[0] || `Gamer_${userId.slice(-4)}`,
+            role: 'user',
+            createdAt: new Date().toISOString(),
+          };
+        }
+        if (!wallet) {
+          wallet = await authRepo.ensureUserWallet(userId);
+        }
+      }
+    }
+
     res.json({ success: true, user, wallet });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

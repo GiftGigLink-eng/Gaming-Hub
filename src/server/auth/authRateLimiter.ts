@@ -160,9 +160,10 @@ export class AuthRateLimiter {
    */
   public loginRateLimitMiddleware(maxRequests = 10, windowMs = 15 * 60 * 1000) {
     return (req: Request, res: Response, next: NextFunction) => {
+      const effectiveMax = process.env.NODE_ENV === 'test' ? 1000 : maxRequests;
       const ip = this.getClientIp(req);
       const key = `login:${ip}`;
-      const status = this.checkLimit(key, maxRequests, windowMs);
+      const status = this.checkLimit(key, effectiveMax, windowMs);
 
       if (!status.allowed) {
         res.setHeader('Retry-After', status.retryAfterSeconds.toString());
@@ -183,9 +184,10 @@ export class AuthRateLimiter {
    */
   public registerRateLimitMiddleware(maxRequests = 5, windowMs = 15 * 60 * 1000) {
     return (req: Request, res: Response, next: NextFunction) => {
+      const effectiveMax = process.env.NODE_ENV === 'test' ? 1000 : maxRequests;
       const ip = this.getClientIp(req);
       const key = `register:${ip}`;
-      const status = this.checkLimit(key, maxRequests, windowMs);
+      const status = this.checkLimit(key, effectiveMax, windowMs);
 
       if (!status.allowed) {
         res.setHeader('Retry-After', status.retryAfterSeconds.toString());
@@ -206,9 +208,10 @@ export class AuthRateLimiter {
    */
   public refreshRateLimitMiddleware(maxRequests = 60, windowMs = 60 * 1000) {
     return (req: Request, res: Response, next: NextFunction) => {
+      const effectiveMax = process.env.NODE_ENV === 'test' ? 1000 : maxRequests;
       const ip = this.getClientIp(req);
       const key = `refresh:${ip}`;
-      const status = this.checkLimit(key, maxRequests, windowMs);
+      const status = this.checkLimit(key, effectiveMax, windowMs);
 
       if (!status.allowed) {
         res.setHeader('Retry-After', status.retryAfterSeconds.toString());

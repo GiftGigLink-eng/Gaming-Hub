@@ -3,7 +3,7 @@ if (process.env.NODE_ENV === 'test' && !process.env.FIRESTORE_EMULATOR_HOST) {
 }
 
 import { getFirestore, Firestore, FieldPath } from 'firebase-admin/firestore';
-import { adminApp } from './firebaseAdmin.js';
+import { getAdminApp } from './firebaseAdmin.js';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   GamingSession,
@@ -234,7 +234,7 @@ export class FirestoreRepository {
 
   constructor() {
     const databaseId = firebaseConfig.firestoreDatabaseId || '(default)';
-    this.db = getFirestore(adminApp, databaseId);
+    this.db = getFirestore(getAdminApp(), databaseId);
   }
 
   public getFirestoreInstance(): Firestore {

@@ -61,7 +61,21 @@ export function getAuthErrorMessage(err: any): string {
       return 'Sign-in pop-up was closed before completion.';
     case 'auth/operation-not-allowed':
       return 'Email/Password sign-in is not yet enabled in Firebase Console. Please enable Email/Password provider in Firebase Console > Authentication > Sign-in method.';
+    case 'EMAIL_ALREADY_IN_USE':
+      return 'An account with this email address already exists. Please sign in instead.';
+    case 'INVALID_CREDENTIALS':
+      return 'Incorrect email or password. Please verify your credentials or reset your password.';
+    case 'RATE_LIMIT_EXCEEDED':
+      return err.message || 'Too many failed login attempts. Please wait before trying again.';
+    case 'WEAK_PASSWORD':
+      return err.message || 'Password must be at least 8 characters and include uppercase, lowercase, and numbers.';
+    case 'FIREBASE_ACCOUNT_EXISTS_LINKING_REQUIRED':
+      return 'An existing Firebase account was found for this email. Please verify ownership to link independent credentials.';
+    case 'FIREBASE_EMAIL_UNVERIFIED':
+      return 'Your Firebase account email is not yet verified. Please verify your email before linking credentials.';
+    case 'CREDENTIALS_ALREADY_LINKED':
+      return 'Independent credentials are already linked to this account. Please sign in with your password.';
     default:
-      return err.message || 'Authentication failed. Please try again.';
+      return err.message || err.error || 'Authentication failed. Please try again.';
   }
 }

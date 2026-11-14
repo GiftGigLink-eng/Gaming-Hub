@@ -5,17 +5,23 @@ on:
     branches: [ main, master ]
     paths:
       - 'src/server/**'
+      - 'src/lib/**'
       - 'tests/**'
       - 'package.json'
+      - 'package-lock.json'
       - 'firebase.json'
+      - 'firestore.rules'
       - '.github/workflows/backend-auth-ci.yml'
   pull_request:
     branches: [ main, master ]
     paths:
       - 'src/server/**'
+      - 'src/lib/**'
       - 'tests/**'
       - 'package.json'
+      - 'package-lock.json'
       - 'firebase.json'
+      - 'firestore.rules'
       - '.github/workflows/backend-auth-ci.yml'
   workflow_dispatch:
 
@@ -28,24 +34,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 24
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'
           cache: 'npm'
 
-      - name: Set up Java 21 for Firebase Emulator
+      - name: Set up Java 17 for Firebase Emulator
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '17'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run In-Memory Security & Regression Tests (Unit)
-        run: npm run test:auth
-
-      - name: Run Firestore Emulator Integration Tests
+      - name: Run Authentication Security & Migration Test Suites
         run: |
-          npx --yes firebase-tools@15.35.0 emulators:exec --only firestore --project demo-gaminghub-auth-test "STRICT_EMULATOR_REQUIRED=true npm run test:auth:emulator"
+          npm run test:auth
+          npm run test:auth:client
+          npm run test:auth:real
+          npm run test:auth:stage33
+
+      - name: Run Dual-Auth & Firestore Emulator Integration Tests (8 Scenarios)
+        env:
+          STRICT_EMULATOR_REQUIRED: 'true'
+          FIRESTORE_EMULATOR_HOST: '127.0.0.1:8085'
+          GCLOUD_PROJECT: 'demo-gaminghub-auth-test'
+        run: |
+          npx --yes firebase-tools@15.35.0 emulators:exec --only firestore --project demo-gaminghub-auth-test "STRICT_EMULATOR_REQUIRED=true FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 GCLOUD_PROJECT=demo-gaminghub-auth-test npm run test:auth:dual && STRICT_EMULATOR_REQUIRED=true FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 GCLOUD_PROJECT=demo-gaminghub-auth-test npm run test:auth:emulator"

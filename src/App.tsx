@@ -11,7 +11,7 @@ import { LiveRoomsHub } from './components/LiveRoomsHub.js';
 import { RoomViewModal } from './components/RoomViewModal.js';
 import { GamingSession, MatchOpportunity, SupportedGame, Transaction, UserProfile, Wallet, MatchRoom } from './types.js';
 import { ShieldCheck, Zap, Bell, CheckCircle2, AlertCircle, Phone, Sparkles, ArrowLeft, ChevronRight, Smartphone, CreditCard, ArrowDownLeft, ArrowUpRight, Radio, Ticket } from 'lucide-react';
-import { testConnection, authFetch, auth } from './lib/firebase.js';
+import { testConnection, authFetch, auth, authManager } from './lib/firebase.js';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -105,14 +105,20 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Test Firebase connection on boot safely
+  // Helper to determine if any authenticated session is active
+  const isAnyAuthenticated = useCallback(() => {
+    return authManager.isAuthenticated() || Boolean(auth.currentUser);
+  }, []);
+
+  // Test connection & restore session from secure storage (e.g. Android Keystore) on boot
   useEffect(() => {
     testConnection().catch(() => {});
+    authManager.restoreSession().catch(() => {});
   }, []);
 
   // Fetch user profile and wallet
   const fetchUserData = useCallback(async () => {
-    if (!auth.currentUser) return;
+    if (!isAnyAuthenticated()) return;
     try {
       const res = await authFetch('/api/auth/user');
       if (res.status === 401 || !res.ok) return;
@@ -124,11 +130,11 @@ export default function App() {
     } catch (err) {
       console.warn('[App] Notice: Transient network state fetching user data:', err);
     }
-  }, []);
+  }, [isAnyAuthenticated]);
 
   // Fetch active session from server
   const fetchActiveSession = useCallback(async () => {
-    if (!auth.currentUser) return;
+    if (!isAnyAuthenticated()) return;
     try {
       const res = await authFetch('/api/sessions/active');
       if (res.status === 401 || !res.ok) return;
@@ -139,11 +145,11 @@ export default function App() {
     } catch (err) {
       console.warn('[App] Notice: Transient network state fetching active session:', err);
     }
-  }, []);
+  }, [isAnyAuthenticated]);
 
   // Fetch match opportunities from server
   const fetchOpportunities = useCallback(async () => {
-    if (!auth.currentUser) return;
+    if (!isAnyAuthenticated()) return;
     try {
       const res = await authFetch('/api/opportunities');
       if (res.status === 401 || !res.ok) return;
@@ -154,11 +160,11 @@ export default function App() {
     } catch (err) {
       console.warn('[App] Notice: Transient network state fetching match opportunities:', err);
     }
-  }, []);
+  }, [isAnyAuthenticated]);
 
   // Fetch transactions ledger
   const fetchTransactions = useCallback(async () => {
-    if (!auth.currentUser) return;
+    if (!isAnyAuthenticated()) return;
     try {
       const res = await authFetch('/api/transactions');
       if (res.status === 401 || !res.ok) return;
@@ -169,12 +175,12 @@ export default function App() {
     } catch (err) {
       console.warn('[App] Notice: Transient network state fetching transactions:', err);
     }
-  }, []);
+  }, [isAnyAuthenticated]);
 
-  // Initialize data and listen to auth changes
+  // Initialize data and listen to auth changes across both Gaming Hub AuthManager & Firebase
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged((user) => {
-      if (user) {
+    const handleAuthChange = () => {
+      if (isAnyAuthenticated()) {
         fetchUserData();
         fetchActiveSession();
         fetchOpportunities();
@@ -187,21 +193,32 @@ export default function App() {
         setOpportunities([]);
         setTransactions([]);
       }
+    };
+
+    // 1. Firebase auth state listener
+    const unsubscribeFirebase = auth.onAuthStateChanged(() => {
+      handleAuthChange();
+    });
+
+    // 2. Gaming Hub independent AuthManager state listener
+    const unsubscribeGh = authManager.subscribe(() => {
+      handleAuthChange();
     });
 
     // Sync active session and match opportunities every 15 seconds if authenticated
     const timer = setInterval(() => {
-      if (auth.currentUser) {
+      if (isAnyAuthenticated()) {
         fetchActiveSession();
         fetchOpportunities();
       }
     }, 15000);
 
     return () => {
-      unsubscribe();
+      unsubscribeFirebase();
+      unsubscribeGh();
       clearInterval(timer);
     };
-  }, [fetchUserData, fetchActiveSession, fetchOpportunities, fetchTransactions]);
+  }, [isAnyAuthenticated, fetchUserData, fetchActiveSession, fetchOpportunities, fetchTransactions]);
 
   // Stage 3: Purchase Match Opportunity (₦100)
   const handlePurchaseOpportunity = async (gameId: string, gameTitle: string) => {

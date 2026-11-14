@@ -10,6 +10,13 @@ declare global {
       getInstalledGamesList?: () => string; // JSON array of installed package names
       getDeviceModel?: () => string;
       getAndroidVersion?: () => number;
+      // Android Keystore Secure Storage (Stage 3.2 Hardening & Verification)
+      isSecureStorageAvailable?: () => boolean;
+      isHardwareBacked?: () => boolean;
+      getStorageSecurityLevel?: () => string;
+      getSecureItem?: (key: string) => string | null;
+      setSecureItem?: (key: string, value: string) => boolean;
+      removeSecureItem?: (key: string) => boolean;
     };
     GamingHubNative?: {
       isInstalled: (packageId: string) => boolean;

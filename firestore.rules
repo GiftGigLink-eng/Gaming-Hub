@@ -116,5 +116,19 @@ service cloud.firestore {
         allow read, write: if false;
       }
     }
+
+    // Independent Authentication Collections & Deterministic Email Uniqueness Index:
+    // Strictly server-authoritative via Firebase Admin SDK; client reads and writes forbidden.
+    match /auth_email_index/{emailKey} {
+      allow read, write: if false;
+    }
+
+    match /auth_credentials/{userId} {
+      allow read, write: if false;
+    }
+
+    match /auth_sessions/{sessionId} {
+      allow read, write: if false;
+    }
   }
 }

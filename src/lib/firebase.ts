@@ -65,27 +65,69 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
+import { authManager } from './authManager.js';
+
+export { authManager };
+
 /**
  * Authenticated Fetch Helper
- * Attaches genuine Firebase ID token to the Authorization header if a user is logged in.
+ * 
+ * 1. Attaches Gaming Hub access token if independent authentication is active.
+ * 2. Preserves existing Firebase Authentication ID token attachment if Firebase user is logged in.
+ * 3. Handles HTTP 401 responses with safe, single-flight token refresh and one-time retry.
+ * 4. Completely prevents infinite refresh loops.
  */
 export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const isRetry = Boolean((options as any)?._isRetry);
   const headers = new Headers(options.headers || {});
-  
-  try {
-    if (auth.currentUser) {
-      const token = await auth.currentUser.getIdToken();
-      if (token) {
-        headers.set('Authorization', `Bearer ${token}`);
+  let usedGamingHub = false;
+
+  // 1. Prioritize Gaming Hub independent auth if active
+  if (authManager.isAuthenticated()) {
+    try {
+      const ghToken = await authManager.getValidAccessToken();
+      if (ghToken) {
+        headers.set('Authorization', `Bearer ${ghToken}`);
+        usedGamingHub = true;
       }
+    } catch {
+      // Safe fallback without exposing tokens
     }
-  } catch (err) {
-    console.warn('[authFetch] Could not retrieve ID token:', err);
   }
 
-  return fetch(url, {
+  // 2. Fall back to Firebase Authentication if Gaming Hub session is not active
+  if (!usedGamingHub) {
+    try {
+      if (auth.currentUser) {
+        const token = await auth.currentUser.getIdToken();
+        if (token) {
+          headers.set('Authorization', `Bearer ${token}`);
+        }
+      }
+    } catch (err) {
+      console.warn('[authFetch] Could not retrieve Firebase ID token');
+    }
+  }
+
+  const response = await fetch(url, {
     ...options,
     headers,
   });
+
+  // 3. Handle HTTP 401 safely for Gaming Hub requests (one-time retry)
+  if (response.status === 401 && !isRetry && usedGamingHub) {
+    const refreshedToken = await authManager.refreshSession();
+    if (refreshedToken) {
+      const retryHeaders = new Headers(options.headers || {});
+      retryHeaders.set('Authorization', `Bearer ${refreshedToken}`);
+      return await fetch(url, {
+        ...options,
+        headers: retryHeaders,
+        ...({ _isRetry: true } as any),
+      });
+    }
+  }
+
+  return response;
 }
 

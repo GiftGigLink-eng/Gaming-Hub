@@ -13,6 +13,9 @@
     "test": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 tsx tests/gaming_hub.test.ts",
     "test:auth": "tsx tests/auth_stage2.test.ts",
     "test:auth:dual": "NODE_ENV=test tsx tests/auth_dual_middleware.test.ts",
+    "test:auth:client": "NODE_ENV=test tsx tests/auth_client_manager.test.ts",
+    "test:auth:real": "NODE_ENV=test tsx tests/auth_client_real_integration.test.ts",
+    "test:auth:stage33": "NODE_ENV=test tsx tests/auth_stage33_migration.test.ts",
     "test:auth:emulator": "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 tsx tests/auth_emulator_integration.test.ts"
   },
   "dependencies": {
