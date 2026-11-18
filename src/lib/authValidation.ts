@@ -22,15 +22,29 @@ export function validateEmail(email: string): { valid: boolean; error?: string }
   return { valid: true };
 }
 
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 128;
+
 /**
- * Validates player password strength (min 6 chars as mandated by Firebase Auth)
+ * Validates player password strength to match Gaming Hub backend requirements:
+ * - Minimum 8 characters, maximum 128 characters
+ * - Contains at least one letter and one number
  */
 export function validatePassword(password: string): { valid: boolean; error?: string } {
   if (!password || typeof password !== 'string') {
     return { valid: false, error: 'Password is required.' };
   }
-  if (password.length < 6) {
-    return { valid: false, error: 'Password must be at least 6 characters long.' };
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return { valid: false, error: `Password cannot exceed ${MAX_PASSWORD_LENGTH} characters.` };
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return { valid: false, error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters long.` };
+  }
+  if (!/[a-zA-Z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one letter.' };
+  }
+  if (!/[0-9]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one number.' };
   }
   return { valid: true };
 }
@@ -52,7 +66,7 @@ export function getAuthErrorMessage(err: any): string {
     case 'auth/email-already-in-use':
       return 'An account with this email address already exists. Please sign in instead.';
     case 'auth/weak-password':
-      return 'Password is too weak. Please use at least 6 characters.';
+      return 'Password is too weak. Please use at least 8 characters, including at least one letter and one number.';
     case 'auth/too-many-requests':
       return 'Access to this account has been temporarily disabled due to many failed login attempts. You can immediately restore it by resetting your password or try again later.';
     case 'auth/network-request-failed':
@@ -68,7 +82,7 @@ export function getAuthErrorMessage(err: any): string {
     case 'RATE_LIMIT_EXCEEDED':
       return err.message || 'Too many failed login attempts. Please wait before trying again.';
     case 'WEAK_PASSWORD':
-      return err.message || 'Password must be at least 8 characters and include uppercase, lowercase, and numbers.';
+      return err.message || 'Password must be at least 8 characters long and contain at least one letter and one number.';
     case 'FIREBASE_ACCOUNT_EXISTS_LINKING_REQUIRED':
       return 'An existing Firebase account was found for this email. Please verify ownership to link independent credentials.';
     case 'FIREBASE_EMAIL_UNVERIFIED':

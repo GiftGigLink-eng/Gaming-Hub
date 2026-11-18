@@ -195,7 +195,9 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
           );
           return;
         }
-        throw new Error(regResult.error || 'Registration failed.');
+        const apiErr: any = new Error(regResult.error || 'Registration failed.');
+        apiErr.code = regResult.code;
+        throw apiErr;
       }
 
       // Fetch user profile and wallet to synchronize state
@@ -370,7 +372,9 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
       });
 
       if (!linkResult.success) {
-        throw new Error(linkResult.error || 'Account linking failed.');
+        const apiErr: any = new Error(linkResult.error || 'Account linking failed.');
+        apiErr.code = linkResult.code;
+        throw apiErr;
       }
 
       // 3. Fetch synchronized profile & wallet
@@ -752,7 +756,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                 <div className="space-y-1">
                   <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Password (min. 6 chars)</span>
+                    <span>Password (min. 8 chars, letters &amp; numbers)</span>
                   </label>
                   <input
                     type="password"
@@ -760,7 +764,8 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Choose a strong password"
                     required
-                    minLength={6}
+                    minLength={8}
+                    maxLength={128}
                     autoComplete="new-password"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
                   />
@@ -777,7 +782,8 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Confirm your password"
                     required
-                    minLength={6}
+                    minLength={8}
+                    maxLength={128}
                     autoComplete="new-password"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
                   />
@@ -903,7 +909,7 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                 <div className="space-y-1">
                   <label className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>New Independent Password (min. 6 chars)</span>
+                    <span>New Independent Password (min. 8 chars, letters &amp; numbers)</span>
                   </label>
                   <input
                     type="password"
@@ -911,7 +917,8 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Choose your new Gaming Hub password"
                     required
-                    minLength={6}
+                    minLength={8}
+                    maxLength={128}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
                   />
                 </div>
@@ -927,7 +934,8 @@ export const PhoneAuthModal: React.FC<PhoneAuthModalProps> = ({
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Confirm your new password"
                     required
-                    minLength={6}
+                    minLength={8}
+                    maxLength={128}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-emerald-400 transition-colors"
                   />
                 </div>

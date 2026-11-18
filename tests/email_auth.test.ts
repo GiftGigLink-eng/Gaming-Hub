@@ -42,14 +42,18 @@ run('validatePassword: rejects empty or undefined passwords', () => {
   assert.strictEqual(validatePassword('').valid, false);
 });
 
-run('validatePassword: rejects passwords shorter than 6 characters (Firebase Auth requirement)', () => {
+run('validatePassword: rejects passwords shorter than 8 characters, missing letters/numbers, or over 128 characters', () => {
   assert.strictEqual(validatePassword('12345').valid, false);
-  assert.strictEqual(validatePassword('abc').valid, false);
+  assert.strictEqual(validatePassword('Pass123').valid, false);
+  assert.strictEqual(validatePassword('12345678').valid, false);
+  assert.strictEqual(validatePassword('onlyletters').valid, false);
+  assert.strictEqual(validatePassword('a'.repeat(128) + '1').valid, false);
 });
 
-run('validatePassword: accepts passwords with 6 or more characters', () => {
-  assert.strictEqual(validatePassword('123456').valid, true);
+run('validatePassword: accepts passwords with 8-128 characters containing at least one letter and one number', () => {
+  assert.strictEqual(validatePassword('Pass1234').valid, true);
   assert.strictEqual(validatePassword('GamingPass2026!').valid, true);
+  assert.strictEqual(validatePassword('a'.repeat(127) + '1').valid, true);
 });
 
 // 3. Firebase Auth error translation tests
