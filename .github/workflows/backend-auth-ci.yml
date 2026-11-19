@@ -2,7 +2,7 @@ name: Backend Authentication CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, stage-3-3-verification ]
     paths:
       - 'src/server/**'
       - 'src/lib/**'
@@ -13,7 +13,7 @@ on:
       - 'firestore.rules'
       - '.github/workflows/backend-auth-ci.yml'
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, stage-3-3-verification ]
     paths:
       - 'src/server/**'
       - 'src/lib/**'
@@ -40,11 +40,17 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Set up Java 17 for Firebase Emulator
+      - name: Set up Java 21 for Firebase Emulator
+        id: setup-java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
+
+      - name: Activate Java 21 in JAVA_HOME and PATH
+        run: |
+          echo "JAVA_HOME=${{ steps.setup-java.outputs.path }}" >> "$GITHUB_ENV"
+          echo "${{ steps.setup-java.outputs.path }}/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: npm ci
@@ -55,6 +61,21 @@ jobs:
           npm run test:auth:client
           npm run test:auth:real
           npm run test:auth:stage33
+
+      - name: Verify Active Java 21 Runtime Before Emulator Execution
+        run: |
+          echo "$JAVA_HOME"
+          java -version
+          which java
+          JAVA_VERSION_STR=$(java -version 2>&1 | awk -F '"' '/version/ {print $2; exit}')
+          JAVA_MAJOR=${JAVA_VERSION_STR%%.*}
+          if [ "$JAVA_MAJOR" = "1" ]; then
+            JAVA_MAJOR=$(echo "$JAVA_VERSION_STR" | cut -d'.' -f2)
+          fi
+          if ! echo "$JAVA_MAJOR" | grep -qE '^[0-9]+$' || [ "$JAVA_MAJOR" -lt 21 ]; then
+            echo "ERROR: Active Java major version ($JAVA_VERSION_STR) is below 21." >&2
+            exit 1
+          fi
 
       - name: Run Dual-Auth & Firestore Emulator Integration Tests (8 Scenarios)
         env:
